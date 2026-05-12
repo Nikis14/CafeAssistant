@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtualenvs
+venv/
+.venv/
+env/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project artifacts
+*.db
+*.sqlite
+*.sqlite3
+data/
+.chroma/
+parsers_cache/
+logs/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Build
+dist/
+build/

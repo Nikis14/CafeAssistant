@@ -1,0 +1,28 @@
+# Provider SDKs (only needed for the providers you actually use)
+anthropic>=0.40.0
+openai>=2.0.0
+google-genai>=1.0.0
+mistralai>=2.0.0
+
+# LangChain core
+langchain>=1.0.0
+langchain-core>=1.0.0
+
+# LangGraph (orchestrator + prebuilt ReAct agent)
+langgraph>=0.6.0
+
+# LiteLLM bridge for provider switching from a single ChatLiteLLM instance
+langchain-litellm>=0.2.0
+litellm>=1.50.0
+
+# UI
+gradio>=4.40.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pyyaml>=6.0.1
+
+# Dev (also installable via `pip install -e .[dev]` once we add extras)
+ruff>=0.6.0
+pytest>=8.0.0
