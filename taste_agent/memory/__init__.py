@@ -10,7 +10,17 @@ from taste_agent.memory.episodic import (
     reset_all_sessions as reset_all_episodic_sessions,
     set_default as set_default_episodic,
 )
-from taste_agent.memory.schemas import EpisodicEvent, SemanticFact
+from taste_agent.memory.procedural import (
+    ProceduralMemory,
+    get_default as get_default_procedural,
+    reset_all_sessions as reset_all_procedural_sessions,
+    set_default as set_default_procedural,
+)
+from taste_agent.memory.schemas import (
+    EpisodicEvent,
+    InferredPattern,
+    SemanticFact,
+)
 from taste_agent.memory.semantic import (
     SemanticMemory,
     get_default as get_default_semantic,
@@ -22,15 +32,20 @@ __all__ = [
     "DEFAULT_SESSION_ID",
     "EpisodicEvent",
     "EpisodicMemory",
+    "InferredPattern",
+    "ProceduralMemory",
     "SemanticFact",
     "SemanticMemory",
     "current_session_id",
     "get_default_episodic",
+    "get_default_procedural",
     "get_default_semantic",
     "reset_all_episodic_sessions",
+    "reset_all_procedural_sessions",
     "reset_all_semantic_sessions",
     "reset_session_id",
     "set_default_episodic",
+    "set_default_procedural",
     "set_default_semantic",
     "set_session_id",
 ]

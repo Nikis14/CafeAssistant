@@ -207,3 +207,66 @@ def test_format_note_suppresses_factuality_when_ok_flag_true():
         factuality_concerns=["minor advisory"],
     )
     assert "judge:factuality" not in _format_output_note(result)
+
+
+# ── format_agent_response_node — PII in clarifications (Codex P2) ───────────
+
+
+def _make_format_state(clarifications=None):
+    """Helper: build a minimal but real OrchestratorState for testing
+    format_agent_response_node. Uses real GuardrailResult / OutputGuardrailResult
+    so the schema stays in sync with the production types."""
+    from langchain_core.messages import HumanMessage
+
+    from taste_agent.guardrails.input import GuardrailResult
+    from taste_agent.guardrails.output import OutputGuardrailResult
+    from taste_agent.memory.reflection import ReflectionResult
+
+    return {
+        "guard_result": GuardrailResult(
+            cleaned_text="hi", pii_redactions=0, injection_flagged=False, out_of_scope=False
+        ),
+        "out_guard": OutputGuardrailResult(response_text="ok"),
+        "agent_messages": [HumanMessage(content="hi")],
+        "facts": {},
+        "patterns_text": "",
+        "response_text": "ok",
+        "pending_before_id": None,
+        "reflection_result": ReflectionResult(clarifications=clarifications or []),
+    }
+
+
+def test_clarifications_are_pii_redacted_before_appending():
+    """Reflection sub-agent's LLM output bypasses output_guardrail_node;
+    format_agent_response_node must run a deterministic PII pass on the
+    appended clarification block."""
+    from taste_agent.orchestrator import format_agent_response_node
+
+    state = _make_format_state(
+        clarifications=["Should I email you at chef@iva.rs about this?"]
+    )
+    out = format_agent_response_node(state)
+    assert "chef@iva.rs" not in out["response_text"]
+    assert "[REDACTED-EMAIL]" in out["response_text"]
+    assert out["debug"]["clarification_pii_redactions"] == 1
+
+
+def test_clarifications_capped_at_two_per_turn():
+    """If reflection queues many questions, only the first 2 are appended;
+    the rest get dropped and counted in debug."""
+    from taste_agent.orchestrator import format_agent_response_node
+
+    state = _make_format_state(
+        clarifications=[
+            "Q1: should I remember A?",
+            "Q2: should I remember B?",
+            "Q3: should I remember C?",
+            "Q4: should I remember D?",
+        ]
+    )
+    out = format_agent_response_node(state)
+    assert "Q1" in out["response_text"]
+    assert "Q2" in out["response_text"]
+    assert "Q3" not in out["response_text"]
+    assert "Q4" not in out["response_text"]
+    assert out["debug"]["clarifications_dropped"] == 2

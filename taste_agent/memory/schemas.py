@@ -54,3 +54,25 @@ class EpisodicEvent(BaseModel):
     )
     address: str | None = None
     cuisine: str | None = None
+
+
+class InferredPattern(BaseModel):
+    """A behavioral pattern derived from the user's episodic + semantic history.
+
+    Distinct from ``SemanticFact``: facts are what the user explicitly stated;
+    patterns are what we noticed about their behavior.
+    """
+
+    text: str = Field(..., description="Free-form pattern description.")
+    confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="How sure we are based on the evidence count and consistency.",
+    )
+    evidence_count: int = Field(
+        default=1,
+        ge=1,
+        description="Number of episodes / facts this pattern was derived from.",
+    )
+    derived_at: datetime | None = None

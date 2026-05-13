@@ -123,8 +123,8 @@ def test_refresh_panels_reads_from_session_memory(monkeypatch):
 
     from app import _refresh_panels
 
-    semantic_a, _, _ = _refresh_panels(_FakeRequest("user-a"))
-    semantic_b, _, _ = _refresh_panels(_FakeRequest("user-b"))
+    semantic_a, _, _, _ = _refresh_panels(_FakeRequest("user-a"))
+    semantic_b, _, _, _ = _refresh_panels(_FakeRequest("user-b"))
     assert semantic_a == {"dietary": "vegetarian"}
     assert semantic_b == {"dietary": "carnivore"}
 
@@ -164,10 +164,12 @@ def test_refresh_panels_falls_back_to_default_when_no_request():
     must not crash; it should read the default session."""
     from app import _refresh_panels
 
-    semantic, episodic, facts_md = _refresh_panels(None)
+    semantic, episodic, procedural, facts_md = _refresh_panels(None)
     assert isinstance(semantic, dict)
     assert isinstance(episodic, list)
-    assert "Facts in prompt" in facts_md
+    assert isinstance(procedural, list)
+    assert "Facts:" in facts_md
+    assert "Patterns:" in facts_md
 
 
 # ── Multi-conversation per tab ──────────────────────────────────────────────

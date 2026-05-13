@@ -47,10 +47,10 @@ def test_memory_search_respects_k():
     assert len(result) == 2
 
 
-def test_memory_read_reflects_writes_via_skill():
-    """Smoke test: writing via the memorize skill is visible to memory_read."""
-    from taste_agent.skills.memorize.memorize import run
+def test_memory_read_reflects_writes_via_writes_module():
+    """Smoke test: writing via memory.writes is visible to memory_read."""
+    from taste_agent.memory.writes import write_semantic
 
-    run(semantic_facts=[{"key": "favorite_cuisine", "value": "balkan"}])
+    write_semantic("favorite_cuisine", "balkan")
     facts = memory_read.invoke({})
     assert facts.get("favorite_cuisine") == "balkan"

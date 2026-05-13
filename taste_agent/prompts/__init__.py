@@ -69,6 +69,18 @@ def _render_facts(facts: dict[str, str] | None) -> str:
     )
 
 
+def _render_patterns(patterns_text: str | None) -> str:
+    """Render the procedural-patterns block. Empty string when no patterns."""
+    if not patterns_text:
+        return ""
+    return (
+        "\n\nBehavioral patterns we have inferred about this user:\n"
+        f"{patterns_text}\n"
+        "Use these to bias your recommendations. Patterns are inferences, not "
+        "rules — defer to anything the user explicitly says this turn."
+    )
+
+
 # ── Public render functions ──────────────────────────────────────────────────
 
 
@@ -76,6 +88,7 @@ def system_prompt(
     tz: str = DEFAULT_TIMEZONE,
     now: datetime | None = None,
     facts: dict[str, str] | None = None,
+    patterns_text: str | None = None,
 ) -> str:
     """Render the orchestrator's system prompt for this turn.
 
@@ -83,6 +96,8 @@ def system_prompt(
         tz: IANA timezone name (default Europe/Belgrade).
         now: override the timestamp (used in tests).
         facts: dict of known user facts; rendered as a trailing memory block.
+        patterns_text: pre-rendered procedural patterns text (see
+            ``ProceduralMemory.as_text``); rendered as a trailing block.
     """
     current = now if now is not None else datetime.now(ZoneInfo(tz))
     city = tz.split("/")[-1].replace("_", " ")
@@ -91,6 +106,7 @@ def system_prompt(
         timezone=tz,
         city=city,
         facts_section=_render_facts(facts),
+        patterns_section=_render_patterns(patterns_text),
     )
 
 
@@ -107,3 +123,18 @@ def output_judge_prompt(*, context: str, response: str) -> str:
         response: the agent's draft reply being judged.
     """
     return load_template("output_judge").format(context=context, response=response)
+
+
+def reflect_prompt() -> str:
+    """Render the reflection sub-agent's system prompt (no variables — the
+    turn data is passed via the HumanMessage to keep system/user separation
+    clean)."""
+    return load_template("reflect").format()
+
+
+def derive_patterns_prompt(*, semantic_block: str, episodic_block: str) -> str:
+    """Render the procedural-derivation prompt."""
+    return load_template("derive_patterns").format(
+        semantic_block=semantic_block or "(none)",
+        episodic_block=episodic_block or "(none)",
+    )

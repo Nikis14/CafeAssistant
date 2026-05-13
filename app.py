@@ -23,6 +23,7 @@ from taste_agent.config import DEFAULT_MODEL_ID, MODEL_REGISTRY  # noqa: E402
 from taste_agent.logging_ import configure_logging, get_logger  # noqa: E402
 from taste_agent.memory import (  # noqa: E402
     get_default_episodic,
+    get_default_procedural,
     get_default_semantic,
     reset_session_id,
     set_session_id,
@@ -130,9 +131,19 @@ def _snapshot_episodic(k: int = 5) -> list[dict[str, object]]:
     return [e.model_dump(exclude_none=True) for e in events]
 
 
+def _snapshot_procedural() -> list[dict[str, object]]:
+    """Return current inferred behavioral patterns for the side panel."""
+    try:
+        patterns = get_default_procedural().all()
+    except Exception as e:
+        logger.warning("procedural snapshot failed: %s", e)
+        return []
+    return [p.model_dump(exclude_none=True) for p in patterns]
+
+
 def _refresh_panels(
     request: gr.Request | None = None,
-) -> tuple[dict[str, str], list[dict[str, object]], str]:
+) -> tuple[dict[str, str], list[dict[str, object]], list[dict[str, object]], str]:
     """Re-compute the side panels and the per-turn signal line.
 
     Reads from the same session as ``chat_fn`` so the panels show *this
@@ -143,10 +154,22 @@ def _refresh_panels(
     try:
         debug = _LAST_DEBUG_BY_SESSION.get(sid, {})
         facts_n = debug.get("n_facts_in_prompt", 0)
+        patterns_count = len(_snapshot_procedural())
+        reflection_info = debug.get("reflection", {})
+        reflection_summary = ""
+        if reflection_info and not reflection_info.get("skipped"):
+            sw = reflection_info.get("semantic_writes", 0)
+            ew = reflection_info.get("episodic_writes", 0)
+            cw = reflection_info.get("clarifications", 0)
+            if sw or ew or cw:
+                reflection_summary = (
+                    f" · reflection: +{sw} fact(s), +{ew} event(s), {cw} clarification(s)"
+                )
         return (
             _snapshot_semantic(),
             _snapshot_episodic(),
-            f"**Facts in prompt this turn:** {facts_n}",
+            _snapshot_procedural(),
+            f"**Facts:** {facts_n} | **Patterns:** {patterns_count}{reflection_summary}",
         )
     finally:
         reset_session_id(token)
@@ -319,18 +342,28 @@ def build_ui() -> gr.Blocks:
                 gr.Markdown("### What I remember about you")
                 semantic_view = gr.JSON(
                     value=_snapshot_semantic,
-                    label="Semantic facts (durable)",
+                    label="Semantic facts (what you told me)",
                 )
                 gr.Markdown("### Recent dining experiences")
                 episodic_view = gr.JSON(
                     value=_snapshot_episodic,
                     label="Episodic memory (date-ordered)",
                 )
-                facts_counter = gr.Markdown("**Facts in prompt this turn:** 0")
+                gr.Markdown("### Patterns I've noticed")
+                procedural_view = gr.JSON(
+                    value=_snapshot_procedural,
+                    label="Inferred patterns (derived every ~5 episodes)",
+                )
+                facts_counter = gr.Markdown("**Facts:** 0 | **Patterns:** 0")
                 refresh_btn = gr.Button("Refresh memory", variant="secondary")
                 refresh_btn.click(
                     fn=_refresh_panels,
-                    outputs=[semantic_view, episodic_view, facts_counter],
+                    outputs=[
+                        semantic_view,
+                        episodic_view,
+                        procedural_view,
+                        facts_counter,
+                    ],
                 )
 
         # ── Event wiring ────────────────────────────────────────────────
@@ -379,7 +412,7 @@ def build_ui() -> gr.Blocks:
         # turn or conversation switch). Live "memory grows as you talk" beat.
         chatbot.change(
             fn=_refresh_panels,
-            outputs=[semantic_view, episodic_view, facts_counter],
+            outputs=[semantic_view, episodic_view, procedural_view, facts_counter],
         )
 
     return app

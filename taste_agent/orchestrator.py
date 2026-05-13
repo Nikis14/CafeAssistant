@@ -49,11 +49,14 @@ from taste_agent.guardrails import (
     OutputGuardrailResult,
     approve,
     get_pending,
+    redact_output_pii,
     run_input_guardrails,
     run_output_guardrails,
 )
 from taste_agent.logging_ import get_logger, trace
-from taste_agent.memory import get_default_semantic
+from taste_agent.memory import get_default_procedural, get_default_semantic
+from taste_agent.memory.derive import maybe_derive_procedural
+from taste_agent.memory.reflection import ReflectionResult, run_reflection
 from taste_agent.prompts import system_prompt
 from taste_agent.skill_loader import load_all_skills
 from taste_agent.skills.reserve_table.reserve_table import (
@@ -257,6 +260,7 @@ class OrchestratorState(TypedDict, total=False):
     model_id: str
     model_factory: ModelFactory | None
     skip_output_judge: bool | None
+    skip_reflection: bool | None
 
     # ── Set by input_guardrail_node ──
     guard_result: GuardrailResult
@@ -270,10 +274,17 @@ class OrchestratorState(TypedDict, total=False):
 
     # ── Set by agent_node ──
     facts: dict[str, str]
+    patterns_text: str
     agent_messages: list[BaseMessage]
 
     # ── Set by output_guardrail_node ──
     out_guard: OutputGuardrailResult
+
+    # ── Set by reflection_node ──
+    reflection_result: ReflectionResult
+
+    # ── Set by procedural_derive_node ──
+    procedural_derived: bool
 
     # ── Outputs (populated by terminal nodes) ──
     response_text: str
@@ -371,12 +382,13 @@ def cancel_node(state: OrchestratorState) -> dict[str, Any]:
 
 
 def agent_node(state: OrchestratorState) -> dict[str, Any]:
-    """Invoke the ReAct agent with injected memory facts + history."""
+    """Invoke the ReAct agent with injected memory facts + patterns + history."""
     facts = get_default_semantic().as_dict()
+    patterns_text = get_default_procedural().as_text()
     agent = build_agent(state["model_id"], model_factory=state.get("model_factory"))
 
     messages: list[BaseMessage] = [
-        SystemMessage(content=system_prompt(facts=facts)),
+        SystemMessage(content=system_prompt(facts=facts, patterns_text=patterns_text)),
         *state["history"],
         HumanMessage(content=state["cleaned_text"]),
     ]
@@ -390,6 +402,7 @@ def agent_node(state: OrchestratorState) -> dict[str, Any]:
     )
     return {
         "facts": facts,
+        "patterns_text": patterns_text,
         "agent_messages": all_msgs,
         "response_text": response_text,
     }
@@ -413,6 +426,35 @@ def output_guardrail_node(state: OrchestratorState) -> dict[str, Any]:
         }
 
 
+def reflection_node(state: OrchestratorState) -> dict[str, Any]:
+    """Run the reflection sub-agent (env-controlled). Updates semantic +
+    episodic memory automatically based on what the user said this turn."""
+    with trace("node:reflection"):
+        out_factory = state.get("model_factory") or _default_model_factory
+        # Use the PII-stripped response WITHOUT the guardrail note — the note
+        # is meta-content; reflection should see what the user sees as the
+        # substantive reply.
+        clean_response = state["out_guard"].response_text
+        collector = run_reflection(
+            user_message=state["cleaned_text"],
+            agent_response=clean_response,
+            model_factory=out_factory,
+            skip=state.get("skip_reflection"),
+        )
+        return {"reflection_result": collector}
+
+
+def procedural_derive_node(state: OrchestratorState) -> dict[str, Any]:
+    """Conditionally derive procedural patterns — only when enough new
+    episodes accumulated since the last derivation (default: 5)."""
+    with trace("node:procedural_derive"):
+        out_factory = state.get("model_factory") or _default_model_factory
+        ran = maybe_derive_procedural(model_factory=out_factory)
+        if ran:
+            logger.info("procedural patterns derived this turn")
+        return {"procedural_derived": ran}
+
+
 def format_agent_response_node(state: OrchestratorState) -> dict[str, Any]:
     """Build the final debug dict and (if a new pending was registered during
     this turn) append a yes/no confirmation CTA so the next turn's intent
@@ -430,8 +472,24 @@ def format_agent_response_node(state: OrchestratorState) -> dict[str, Any]:
             "tool_calls": _count_tool_calls(all_msgs),
             "n_messages": len(all_msgs),
             "n_facts_in_prompt": len(facts),
+            "patterns_in_prompt": bool(state.get("patterns_text")),
             "output_guard": out_guard.summary_for_debug(),
+            "procedural_derived": bool(state.get("procedural_derived")),
         }
+
+        # Reflection details — surface the writes / conflicts / clarifications
+        # so the Gradio sidebar can show "memory just changed".
+        reflection = state.get("reflection_result")
+        if reflection is not None:
+            debug["reflection"] = {
+                "skipped": reflection.skipped,
+                "semantic_writes": len(reflection.semantic_writes),
+                "episodic_writes": len(reflection.episodic_writes),
+                "conflicts": len(reflection.semantic_conflicts),
+                "clarifications": len(reflection.clarifications),
+                "tool_calls": reflection.tool_calls,
+                "error": reflection.error,
+            }
 
         pending_before_id = state.get("pending_before_id")
         pending_after = get_pending()
@@ -447,6 +505,36 @@ def format_agent_response_node(state: OrchestratorState) -> dict[str, Any]:
                 "Reply **yes** to confirm or **no** to cancel."
             )
             debug["pending_approval"] = pending_after.action_id
+
+        # Append clarifications queued during reflection. The user sees them
+        # as a natural-language follow-up so they can disambiguate next turn.
+        #
+        # Important: these come from the reflection sub-agent's LLM output
+        # and therefore bypass the main output_guardrail_node above. Run a
+        # deterministic PII redaction pass before appending — a hallucinated
+        # phone/email/card in a clarification question would otherwise leak
+        # straight to the user.
+        #
+        # Cap at 2 questions per turn to avoid chatbot-spammy outputs when
+        # the sub-agent gets enthusiastic. Surplus questions are dropped
+        # (and surfaced in debug) — the user can clarify on a later turn.
+        if reflection is not None and reflection.clarifications:
+            max_clarifications = 2
+            cleaned_qs: list[str] = []
+            clarification_pii_redactions = 0
+            for q in reflection.clarifications[:max_clarifications]:
+                cleaned, n, _ = redact_output_pii(q)
+                cleaned_qs.append(cleaned)
+                clarification_pii_redactions += n
+            dropped = max(0, len(reflection.clarifications) - max_clarifications)
+            quoted = "\n".join(f"- {q}" for q in cleaned_qs)
+            response_text = (
+                f"{response_text}\n\nBefore I forget — a quick question:\n{quoted}"
+            )
+            if clarification_pii_redactions:
+                debug["clarification_pii_redactions"] = clarification_pii_redactions
+            if dropped:
+                debug["clarifications_dropped"] = dropped
 
         return {"response_text": response_text, "debug": debug}
 
@@ -488,6 +576,8 @@ def _build_orchestrator_graph() -> Any:
     g.add_node("cancel", cancel_node)
     g.add_node("agent", agent_node)
     g.add_node("output_guardrail", output_guardrail_node)
+    g.add_node("reflection", reflection_node)
+    g.add_node("procedural_derive", procedural_derive_node)
     g.add_node("format_agent_response", format_agent_response_node)
 
     g.set_entry_point("input_guardrail")
@@ -504,8 +594,14 @@ def _build_orchestrator_graph() -> Any:
     )
     g.add_edge("finalize", END)
     g.add_edge("cancel", END)
+    # Agent path: agent → output_guardrail → reflection → procedural_derive
+    # → format_agent_response → END. Reflection and procedural_derive both
+    # update memory in the background; format_agent_response weaves any
+    # clarifications from reflection into the user-facing reply.
     g.add_edge("agent", "output_guardrail")
-    g.add_edge("output_guardrail", "format_agent_response")
+    g.add_edge("output_guardrail", "reflection")
+    g.add_edge("reflection", "procedural_derive")
+    g.add_edge("procedural_derive", "format_agent_response")
     g.add_edge("format_agent_response", END)
 
     return g.compile()
@@ -534,6 +630,7 @@ def run_turn(
     *,
     model_factory: ModelFactory | None = None,
     skip_output_judge: bool | None = None,
+    skip_reflection: bool | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Run one conversational turn through the orchestrator state graph.
 
@@ -554,6 +651,7 @@ def run_turn(
         "model_id": model_id,
         "model_factory": model_factory,
         "skip_output_judge": skip_output_judge,
+        "skip_reflection": skip_reflection,
     }
     with trace("turn", model=model_id):
         final_state = _get_graph().invoke(initial_state)

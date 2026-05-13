@@ -19,7 +19,9 @@ Taste Agent is a personalized restaurant/café recommender + reservation agent. 
 
 **Guardrail implementation policy**: hand-rolled (regex + dict + set) for pedagogy. Production swap-in candidates documented in `taste_agent/guardrails/__init__.py`: Presidio for PII, NeMo Guardrails / Guardrails AI / LLM Guard for full pipelines, Llama Guard for safety classification, LangChain `moderation` chain for OpenAI-flavored toxicity. Keep `action.py` hand-rolled regardless — the deterministic-vs-LLM-judge contrast is the centerpiece teaching moment.
 
-**Memory layers**: thread (LangGraph `MemorySaver`), semantic (SQLite), episodic (Chroma + SQLite), procedural (future iteration).
+**Memory layers**: thread (Gradio `gr.State`, per browser session), semantic (SQLite key-value, what the user explicitly stated), episodic (Chroma vector store, dining experiences), procedural (SQLite, behavioral patterns inferred every ~5 episodes). All four are scoped per session via a ContextVar.
+
+**Per-turn cost**: with default settings, one user turn invokes ~3 LLM calls — the main agent, the output-guardrail judge (`TASTE_AGENT_SKIP_OUTPUT_JUDGE=1` to disable), and the reflection sub-agent that auto-updates memory (`TASTE_AGENT_SKIP_REFLECTION=1` to disable). Procedural derivation adds an occasional call (~0.2 amortized at the 5-episode threshold). Tests set both skip-flags via `conftest.py` so the suite costs nothing.
 
 **Stack**: LangGraph + LangChain, LiteLLM for provider switching (Claude / GPT-5 family / Gemini / Mistral), LangSmith for tracing, Gradio for UI, Playwright for browser, Tavily MCP for web search.
 

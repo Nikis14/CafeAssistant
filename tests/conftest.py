@@ -26,6 +26,11 @@ os.environ.setdefault("TASTE_AGENT_FAKE_EMBEDDING", "1")
 # exercise the judge path inject a deterministic fake JSON-returning model.
 os.environ.setdefault("TASTE_AGENT_SKIP_OUTPUT_JUDGE", "1")
 
+# Skip the reflection sub-agent by default. It costs an extra LLM call per
+# turn and exercises tool-calling that needs a specialized fake; tests that
+# want to verify reflection pass model_factory + skip_reflection=False.
+os.environ.setdefault("TASTE_AGENT_SKIP_REFLECTION", "1")
+
 
 @pytest.fixture
 def capture_logs() -> StringIO:
@@ -97,17 +102,20 @@ def _reset_phase2_state():
 
 @pytest.fixture(autouse=True)
 def _reset_phase3_memory():
-    """Reset semantic + episodic memory defaults across all sessions."""
+    """Reset semantic + episodic + procedural memory defaults across all sessions."""
     from taste_agent.memory import (
         reset_all_episodic_sessions,
+        reset_all_procedural_sessions,
         reset_all_semantic_sessions,
     )
 
     reset_all_semantic_sessions()
     reset_all_episodic_sessions()
+    reset_all_procedural_sessions()
     yield
     reset_all_semantic_sessions()
     reset_all_episodic_sessions()
+    reset_all_procedural_sessions()
 
 
 @pytest.fixture(autouse=True)
