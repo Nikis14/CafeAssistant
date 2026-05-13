@@ -168,3 +168,183 @@ def test_refresh_panels_falls_back_to_default_when_no_request():
     assert isinstance(semantic, dict)
     assert isinstance(episodic, list)
     assert "Facts in prompt" in facts_md
+
+
+# ── Multi-conversation per tab ──────────────────────────────────────────────
+
+
+def test_title_for_empty_history_returns_new_chat():
+    from app import _title_for
+
+    assert _title_for([]) == "New chat"
+
+
+def test_title_for_uses_first_user_message():
+    from app import _title_for
+
+    history = [
+        {"role": "user", "content": "Best cappuccino in Belgrade?"},
+        {"role": "assistant", "content": "Try Koffein"},
+    ]
+    assert _title_for(history) == "Best cappuccino in Belgrade?"
+
+
+def test_title_for_truncates_long_messages():
+    from app import _TITLE_MAXLEN, _title_for
+
+    long_msg = "a" * (_TITLE_MAXLEN + 50)
+    title = _title_for([{"role": "user", "content": long_msg}])
+    assert title.endswith("...")
+    assert len(title) == _TITLE_MAXLEN + 3
+
+
+def test_title_for_skips_non_user_messages():
+    from app import _title_for
+
+    history = [
+        {"role": "assistant", "content": "Hi there"},
+    ]
+    assert _title_for(history) == "New chat"
+
+
+def test_conv_choices_returns_reverse_insertion_order():
+    """Most recent (last-inserted) conversation should appear first."""
+    from app import _conv_choices
+
+    convs = {
+        "aaaa1111": [{"role": "user", "content": "first chat"}],
+        "bbbb2222": [{"role": "user", "content": "second chat"}],
+    }
+    choices = _conv_choices(convs)
+    # Newest first → bbbb2222 before aaaa1111
+    assert choices[0][1] == "bbbb2222"
+    assert choices[1][1] == "aaaa1111"
+
+
+def test_create_new_conversation_returns_fresh_id_and_empty_chatbot():
+    from app import create_new_conversation
+
+    convs, active, chatbot, _radio = create_new_conversation({})
+    assert active in convs
+    assert convs[active] == []
+    assert chatbot == []
+
+
+def test_create_new_conversation_preserves_existing():
+    from app import create_new_conversation
+
+    existing = {"old1": [{"role": "user", "content": "hi"}]}
+    convs, active, _chatbot, _radio = create_new_conversation(existing)
+    assert "old1" in convs
+    assert convs["old1"] == [{"role": "user", "content": "hi"}]
+    assert active != "old1"
+
+
+def test_load_conversation_returns_history():
+    from app import load_conversation
+
+    convs = {"abc": [{"role": "user", "content": "hi"}]}
+    history, active = load_conversation("abc", convs)
+    assert history == [{"role": "user", "content": "hi"}]
+    assert active == "abc"
+
+
+def test_load_conversation_unknown_id_returns_empty():
+    from app import load_conversation
+
+    history, active = load_conversation("ghost", {"abc": []})
+    assert history == []
+    assert active is None
+
+
+def test_send_message_auto_creates_conversation_on_first_send(monkeypatch):
+    """When the user sends a message with no active conversation, a new one
+    is auto-created (so a fresh tab works without clicking 'New chat')."""
+    monkeypatch.setattr("app.chat_fn", lambda *_a, **_kw: "the reply")
+
+    from app import send_message
+
+    chatbot, convs, active, _radio, cleared_input = send_message(
+        "hello",
+        chat_history=[],
+        conversations={},
+        active_id=None,
+        model_label="Claude Sonnet 4.6",
+        request=_FakeRequest("user-x"),
+    )
+    assert active is not None
+    assert active in convs
+    assert chatbot[0] == {"role": "user", "content": "hello"}
+    assert chatbot[1] == {"role": "assistant", "content": "the reply"}
+    assert cleared_input == ""
+
+
+def test_send_message_appends_to_active_conversation(monkeypatch):
+    monkeypatch.setattr("app.chat_fn", lambda *_a, **_kw: "second reply")
+
+    from app import send_message
+
+    existing_history = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "first reply"},
+    ]
+    chatbot, convs, active, _radio, _input = send_message(
+        "second",
+        chat_history=existing_history,
+        conversations={"conv1": existing_history},
+        active_id="conv1",
+        model_label="Claude Sonnet 4.6",
+        request=_FakeRequest("user-x"),
+    )
+    assert active == "conv1"
+    assert len(chatbot) == 4
+    assert chatbot[-1]["content"] == "second reply"
+    assert convs["conv1"] == chatbot
+
+
+def test_send_message_empty_input_is_noop(monkeypatch):
+    """Whitespace-only / empty input should not invoke the orchestrator."""
+    called = []
+    monkeypatch.setattr(
+        "app.chat_fn",
+        lambda *_a, **_kw: (called.append(True), "should not be called")[1],
+    )
+
+    from app import send_message
+
+    chatbot, _convs, active, _radio, _input = send_message(
+        "   ",
+        chat_history=[],
+        conversations={},
+        active_id=None,
+        model_label="Claude Sonnet 4.6",
+        request=_FakeRequest("user-x"),
+    )
+    assert called == []
+    assert chatbot == []
+    assert active is None
+
+
+def test_send_message_isolates_conversations_in_state(monkeypatch):
+    """Adding to one conversation must not mutate another."""
+    monkeypatch.setattr("app.chat_fn", lambda *_a, **_kw: "reply-A")
+
+    from app import send_message
+
+    convs = {
+        "convA": [{"role": "user", "content": "A1"}],
+        "convB": [{"role": "user", "content": "B1"}],
+    }
+    _chatbot, updated, active, _radio, _input = send_message(
+        "A2",
+        chat_history=convs["convA"],
+        conversations=convs,
+        active_id="convA",
+        model_label="Claude Sonnet 4.6",
+        request=_FakeRequest("user-x"),
+    )
+    assert active == "convA"
+    # convB untouched
+    assert updated["convB"] == [{"role": "user", "content": "B1"}]
+    # convA grew
+    assert len(updated["convA"]) == 3

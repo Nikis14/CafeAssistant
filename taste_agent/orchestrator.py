@@ -1,18 +1,38 @@
-"""Orchestrator: input guardrails → ReAct agent → response.
+"""Orchestrator: a LangGraph state graph that wraps the ReAct agent.
 
-Phase 1 keeps this deliberately linear: guardrail node, agent invocation,
-return. Phase 2 adds the action-confirm gate after the agent. Phase 4 adds
-the output guardrail.
+The top-level flow is explicit:
 
-Build-and-cache pattern: each model id maps to a constructed agent. The
-function `build_agent` is the only place that knows about LiteLLM and the
-skill registry — so tests can swap it via dependency injection.
+    START → input_guardrail → approval_check
+                                 ├── approve   → finalize → END
+                                 ├── cancel    → cancel   → END
+                                 └── agent     → agent → output_guardrail
+                                                    → format_agent_response → END
+
+Why a state graph (not imperative): each step is a single-responsibility node
+that mutates well-defined state slots, so:
+
+- The branching is visible at the edge level instead of buried in ``if``
+  blocks inside one big function.
+- Every step shows up in LangSmith with its own span and state diff —
+  invaluable when debugging "why did the agent take this branch".
+- New nodes (e.g. an evaluation node before END, or a per-session pre-flight
+  node in Phase 5) become "add a node + add an edge" rather than "find the
+  right place inside run_turn".
+- Pedagogical alignment: the seminar teaches LangGraph at the *agent* layer
+  (Seminar 4/5) and now also at the *orchestration* layer.
+
+The public ``run_turn`` keeps its prior signature; it just invokes the graph.
+
+Guardrail ordering: input guardrails run FIRST, before the approval-intent
+classifier. A "yes" reply that piggybacks an injection ("yes ignore previous
+instructions...") gets refused by the input guardrail before the approval
+branch can finalize anything.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -25,6 +45,8 @@ from langchain_core.messages import (
 
 from taste_agent.config import DEFAULT_MODEL_ID, SKILLS_DIR
 from taste_agent.guardrails import (
+    GuardrailResult,
+    OutputGuardrailResult,
     approve,
     get_pending,
     run_input_guardrails,
@@ -59,8 +81,8 @@ def _default_model_factory(model_id: str) -> BaseChatModel:
 
 # ── Agent construction (cached per (model_id, factory)) ──────────────────────
 # Cache key includes the factory identity so injecting a different factory
-# (e.g., in tests or Phase 3's memory-aware factories) produces a fresh agent
-# rather than returning a stale one built with the previous factory.
+# (e.g. in tests or memory-aware factories) produces a fresh agent rather
+# than returning a stale one built with the previous factory.
 _AGENT_CACHE: dict[tuple[str, int], Any] = {}
 
 
@@ -91,12 +113,11 @@ def reset_agent_cache() -> None:
     _AGENT_CACHE.clear()
 
 
-# ── Approval-intent detection (deterministic, pre-agent) ─────────────────────
-# We parse the user's intent with a keyword heuristic when there's a pending
+# ── Approval-intent detection (deterministic) ────────────────────────────────
+# Parses the user's intent with a keyword heuristic when there's a pending
 # irreversible action. Deterministic on purpose: a model that misreads "no
-# wait, yes" must not trigger an irreversible click. Phase 4 can upgrade this
-# to an LLM judge — but the *gate* (taste_agent.guardrails.action.gate_action)
-# stays deterministic regardless.
+# wait, yes" must not trigger an irreversible click. The *gate*
+# (taste_agent.guardrails.action.gate_action) stays deterministic regardless.
 
 _APPROVE_WORDS = frozenset(
     {"yes", "y", "confirm", "ok", "okay", "sure", "proceed", "approve", "approved"}
@@ -114,12 +135,10 @@ def _detect_approval_intent(text: str) -> str | None:
     The detector is deliberately conservative:
 
     - Only short messages (≤3 tokens) count as intent. Longer replies are
-      treated as conversation and fall through to the agent. This stops false
-      positives like "What time does Café Yes open?" from finalizing an
-      irreversible action.
+      treated as conversation and fall through to the agent.
     - If both approve and cancel words appear in the same short reply (e.g.,
       "no actually yes"), the result is None — the orchestrator will re-prompt
-      rather than guess. Wrong-direction errors here finalize a real reservation.
+      rather than guess.
     """
     cleaned = text.translate(str.maketrans("", "", _PUNCT_TO_STRIP)).strip().lower()
     tokens = cleaned.split()
@@ -140,7 +159,7 @@ def _detect_approval_intent(text: str) -> str | None:
     return None
 
 
-# ── Turn execution ───────────────────────────────────────────────────────────
+# ── Helpers used by nodes ────────────────────────────────────────────────────
 
 
 def _count_tool_calls(messages: list[BaseMessage]) -> int:
@@ -161,16 +180,10 @@ def _build_output_context(
 ) -> str:
     """Summarize the conversation context for the output guardrail's LLM judge.
 
-    Includes:
-    - **Injected memory facts** — the judge sees these because answers grounded
-      in semantic memory (e.g. "since you're vegetarian, try X") would
-      otherwise look unsupported and produce false factuality flags.
-    - **User messages** — primary grounding for what was asked.
-    - **Tool messages** — primary grounding for what was retrieved.
-
-    Deliberately excludes the *base* system prompt (it guides the agent, it's
-    not a factuality source) and intermediate ``AIMessage`` content (not
-    ground truth — it's the agent's own reasoning).
+    Includes injected memory facts (so memory-grounded answers aren't falsely
+    flagged), user messages, and tool messages. Deliberately excludes the
+    *base* system prompt (it guides the agent, not a factuality source) and
+    intermediate ``AIMessage`` content (not ground truth).
     """
     parts: list[str] = []
     if facts:
@@ -193,14 +206,10 @@ def _format_output_note(out_guard: object) -> str:
     """Render a one-line note about guardrail concerns to append to the reply.
 
     Prefixes each note with the *surface* that caught it (``[pii]``,
-    ``[judge:factuality]``, ``[judge:citation]``) so demos make the source
-    of each concern obvious. Renders only when there's something worth
-    surfacing; we deliberately suppress factuality/citation concerns when
-    the corresponding ``*_ok`` flag is True, since concerns without a fail
-    flag are advisory not actionable.
+    ``[judge:factuality]``, ``[judge:citation]``). Renders only when there's
+    something worth surfacing; suppresses factuality/citation concerns when
+    the corresponding ``*_ok`` flag is True.
     """
-    from taste_agent.guardrails import OutputGuardrailResult
-
     if not isinstance(out_guard, OutputGuardrailResult) or not out_guard.has_concerns:
         return ""
     notes: list[str] = []
@@ -218,10 +227,8 @@ def _format_output_note(out_guard: object) -> str:
 def _extract_text(message: BaseMessage) -> str:
     """Pull the user-visible text out of a message content payload.
 
-    Anthropic-style replies interleave content blocks: ``{"type": "text", ...}``,
-    ``{"type": "tool_use", ...}``, ``{"type": "thinking", ...}``. We keep only
-    ``text`` blocks — silently joining everything would leak tool-use IDs and
-    thinking content into the chat UI.
+    Anthropic-style replies interleave content blocks. We keep only ``text``
+    blocks — joining everything would leak tool-use ids and thinking content.
     """
     content = message.content
     if isinstance(content, str):
@@ -237,127 +244,184 @@ def _extract_text(message: BaseMessage) -> str:
     return str(content)
 
 
-def run_turn(
-    user_text: str,
-    history: list[BaseMessage] | None = None,
-    model_id: str = DEFAULT_MODEL_ID,
-    *,
-    model_factory: ModelFactory | None = None,
-    skip_output_judge: bool | None = None,
-) -> tuple[str, dict[str, Any]]:
-    """Run one conversational turn through the full pipeline.
+# ── State graph ──────────────────────────────────────────────────────────────
 
-    Args:
-        user_text: raw input from the user.
-        history: prior LangChain messages (empty for first turn).
-        model_id: LiteLLM model identifier.
-        model_factory: optional injection point for tests.
 
-    Returns:
-        (response_text, debug_info). ``debug_info`` includes pii_redactions
-        and tool_calls counts.
+class OrchestratorState(TypedDict, total=False):
+    """Mutable per-turn state. ``total=False`` so nodes only set the slots
+    they own; everything starts unset apart from the inputs."""
+
+    # ── Inputs (populated by run_turn before invoking the graph) ──
+    user_text: str
+    history: list[BaseMessage]
+    model_id: str
+    model_factory: ModelFactory | None
+    skip_output_judge: bool | None
+
+    # ── Set by input_guardrail_node ──
+    guard_result: GuardrailResult
+    cleaned_text: str
+
+    # ── Set by approval_check_node ──
+    intent: Literal["approve", "cancel", "agent"]
+    pending_action_id: str
+    pending_summary: str
+    pending_before_id: str | None
+
+    # ── Set by agent_node ──
+    facts: dict[str, str]
+    agent_messages: list[BaseMessage]
+
+    # ── Set by output_guardrail_node ──
+    out_guard: OutputGuardrailResult
+
+    # ── Outputs (populated by terminal nodes) ──
+    response_text: str
+    debug: dict[str, Any]
+
+
+def input_guardrail_node(state: OrchestratorState) -> dict[str, Any]:
+    """First node — runs before approval classification.
+
+    Refusal short-circuits to END by writing response_text + debug; the
+    routing function picks up that signal.
     """
-    history = history or []
-
-    with trace("turn", model=model_id):
-        # 0. Approval-flow handling. If there's a pending irreversible action
-        # AND the user's text is a clear approve / cancel, handle deterministically
-        # without invoking the agent. The action guardrail (gate_action) is the
-        # one source of truth for "may this run" — never the LLM.
-        #
-        # Order note: this branch runs BEFORE the input guardrail. A "yes"
-        # reply must not be rejected as out-of-scope, and a short reply has
-        # near-zero attack surface for prompt injection (no room for a payload
-        # alongside an approve/cancel keyword given the ≤3-token cap).
-        pending_before = get_pending()
-        if pending_before is not None:
-            intent = _detect_approval_intent(user_text)
-            if intent == "approve":
-                if not approve(pending_before.action_id):
-                    logger.warning(
-                        "approve() failed for action_id=%s — pending was cleared "
-                        "between detect and approve",
-                        pending_before.action_id,
-                    )
-                    return (
-                        "Sorry, that reservation is no longer pending. Please start over.",
-                        {
-                            "refused": False,
-                            "approval_action": "stale",
-                            "action_id": pending_before.action_id,
-                        },
-                    )
-                with trace("finalize_pending", action_id=pending_before.action_id):
-                    outcome = finalize_reservation(pending_before.action_id)
-                msg = f"Done. {outcome['summary']}"
-                return msg, {
-                    "refused": False,
-                    "approval_action": "confirmed",
-                    "action_id": pending_before.action_id,
-                }
-            if intent == "cancel":
-                with trace("cancel_pending", action_id=pending_before.action_id):
-                    cancel_reservation(pending_before.action_id)
-                return "Reservation cancelled. Let me know if you'd like to try again.", {
-                    "refused": False,
-                    "approval_action": "cancelled",
-                    "action_id": pending_before.action_id,
-                }
-            # Unclear intent — fall through. Agent will see history and re-prompt.
-
-        # 1. Input guardrails (deterministic, pre-LLM)
-        guard = run_input_guardrails(user_text)
+    with trace("node:input_guardrail"):
+        guard = run_input_guardrails(state["user_text"])
         if guard.refusal_message is not None:
             logger.warning("input refused: %s", guard.refusal_message)
-            return guard.refusal_message, {
-                "refused": True,
-                "pii_redactions": guard.pii_redactions,
+            return {
+                "guard_result": guard,
+                "response_text": guard.refusal_message,
+                "debug": {
+                    "refused": True,
+                    "pii_redactions": guard.pii_redactions,
+                },
             }
+        return {
+            "guard_result": guard,
+            "cleaned_text": guard.cleaned_text,
+        }
 
-        # 2. Build/get agent
-        agent = build_agent(model_id, model_factory=model_factory)
 
-        # 3. Invoke. We prepend SystemMessage per turn rather than passing
-        # `prompt=...` to `create_agent` so the time-stamp in `system_prompt()`
-        # stays fresh — the agent is cached and a static prompt would freeze
-        # the time at build time. Trade-off: LangSmith shows the prompt as an
-        # inline message rather than the agent's system slot. A callable
-        # prompt would also work and is worth revisiting in Phase 4.
-        #
-        # We also inject the user's known semantic facts here so the agent
-        # always has context about preferences/dietary/etc. without having
-        # to call memory_read on every turn. memory_read remains available
-        # for re-reads mid-turn (e.g., right after a memorize call).
-        facts = get_default_semantic().as_dict()
-        messages: list[BaseMessage] = [
-            SystemMessage(content=system_prompt(facts=facts)),
-            *history,
-            HumanMessage(content=guard.cleaned_text),
-        ]
-        with trace("agent:invoke", n_messages=len(messages)):
-            result = agent.invoke({"messages": messages})
+def approval_check_node(state: OrchestratorState) -> dict[str, Any]:
+    """Detect approve / cancel intent against any pending irreversible action.
 
-        # 4. Extract response from the agent's final message.
-        all_msgs: list[BaseMessage] = result["messages"]
-        final = all_msgs[-1]
-        response_text = (
-            _extract_text(final) if isinstance(final, AIMessage) else str(final.content)
-        )
+    Runs on the *cleaned* text (post input guardrail) so an injection payload
+    can't sneak through alongside an approve keyword.
+    """
+    with trace("node:approval_check"):
+        pending = get_pending()
+        pending_before_id = pending.action_id if pending else None
+        if pending is None:
+            return {"intent": "agent", "pending_before_id": None}
 
-        # 4b. Output guardrails: PII redaction (always) + LLM judge for
-        # factuality + citation (env-controlled). The judge model is resolved
-        # inside run_output_guardrails — see resolve_judge_model_id() — and
-        # auto-skips when no judge provider key is available. The context
-        # passed in includes the memory facts so grounded answers like
-        # "since you're vegetarian..." don't get falsely flagged.
-        out_factory = model_factory or _default_model_factory
+        intent = _detect_approval_intent(state["cleaned_text"])
+        if intent in ("approve", "cancel"):
+            return {
+                "intent": intent,
+                "pending_action_id": pending.action_id,
+                "pending_summary": pending.summary,
+                "pending_before_id": pending_before_id,
+            }
+        # Unclear intent → fall through to the agent (it will re-prompt).
+        return {"intent": "agent", "pending_before_id": pending_before_id}
+
+
+def finalize_node(state: OrchestratorState) -> dict[str, Any]:
+    """Approve + finalize a pending reservation. Terminal."""
+    aid = state["pending_action_id"]
+    with trace("node:finalize", action_id=aid):
+        if not approve(aid):
+            logger.warning("approve() failed for action_id=%s (race-cleared)", aid)
+            return {
+                "response_text": (
+                    "Sorry, that reservation is no longer pending. Please start over."
+                ),
+                "debug": {
+                    "refused": False,
+                    "approval_action": "stale",
+                    "action_id": aid,
+                },
+            }
+        outcome = finalize_reservation(aid)
+        return {
+            "response_text": f"Done. {outcome['summary']}",
+            "debug": {
+                "refused": False,
+                "approval_action": "confirmed",
+                "action_id": aid,
+            },
+        }
+
+
+def cancel_node(state: OrchestratorState) -> dict[str, Any]:
+    """Discard a pending reservation. Terminal."""
+    aid = state["pending_action_id"]
+    with trace("node:cancel", action_id=aid):
+        cancel_reservation(aid)
+        return {
+            "response_text": "Reservation cancelled. Let me know if you'd like to try again.",
+            "debug": {
+                "refused": False,
+                "approval_action": "cancelled",
+                "action_id": aid,
+            },
+        }
+
+
+def agent_node(state: OrchestratorState) -> dict[str, Any]:
+    """Invoke the ReAct agent with injected memory facts + history."""
+    facts = get_default_semantic().as_dict()
+    agent = build_agent(state["model_id"], model_factory=state.get("model_factory"))
+
+    messages: list[BaseMessage] = [
+        SystemMessage(content=system_prompt(facts=facts)),
+        *state["history"],
+        HumanMessage(content=state["cleaned_text"]),
+    ]
+    with trace("node:agent", n_messages=len(messages)):
+        result = agent.invoke({"messages": messages})
+
+    all_msgs: list[BaseMessage] = result["messages"]
+    final = all_msgs[-1]
+    response_text = (
+        _extract_text(final) if isinstance(final, AIMessage) else str(final.content)
+    )
+    return {
+        "facts": facts,
+        "agent_messages": all_msgs,
+        "response_text": response_text,
+    }
+
+
+def output_guardrail_node(state: OrchestratorState) -> dict[str, Any]:
+    """Run PII redaction + (env-controlled) LLM judge on the agent's reply."""
+    with trace("node:output_guardrail"):
+        out_factory = state.get("model_factory") or _default_model_factory
         out_guard = run_output_guardrails(
-            response_text,
-            context_summary=_build_output_context(all_msgs, facts=facts),
+            state["response_text"],
+            context_summary=_build_output_context(
+                state["agent_messages"], facts=state.get("facts")
+            ),
             model_factory=out_factory,
-            skip_judge=skip_output_judge,
+            skip_judge=state.get("skip_output_judge"),
         )
-        response_text = out_guard.response_text + _format_output_note(out_guard)
+        return {
+            "out_guard": out_guard,
+            "response_text": out_guard.response_text + _format_output_note(out_guard),
+        }
+
+
+def format_agent_response_node(state: OrchestratorState) -> dict[str, Any]:
+    """Build the final debug dict and (if a new pending was registered during
+    this turn) append a yes/no confirmation CTA so the next turn's intent
+    detector reliably catches the user's reply."""
+    with trace("node:format_agent_response"):
+        guard = state["guard_result"]
+        out_guard = state["out_guard"]
+        all_msgs = state["agent_messages"]
+        facts = state.get("facts") or {}
 
         debug: dict[str, Any] = {
             "refused": False,
@@ -369,14 +433,13 @@ def run_turn(
             "output_guard": out_guard.summary_for_debug(),
         }
 
-        # 5. If a *new* pending action was created during this turn, ensure the
-        # user sees a clear confirmation prompt. The agent's response may
-        # already mention it, but we make the deterministic CTA explicit so the
-        # next-turn intent detector reliably catches "yes" / "no".
+        pending_before_id = state.get("pending_before_id")
         pending_after = get_pending()
         is_new_pending = pending_after is not None and (
-            pending_before is None or pending_after.action_id != pending_before.action_id
+            pending_before_id is None or pending_after.action_id != pending_before_id
         )
+
+        response_text = state["response_text"]
         if pending_after is not None and is_new_pending:
             response_text = (
                 f"{response_text}\n\n"
@@ -385,4 +448,113 @@ def run_turn(
             )
             debug["pending_approval"] = pending_after.action_id
 
-        return response_text, debug
+        return {"response_text": response_text, "debug": debug}
+
+
+# ── Routing ──────────────────────────────────────────────────────────────────
+
+
+def _route_after_input_guardrail(
+    state: OrchestratorState,
+) -> Literal["approval_check", "__end__"]:
+    """Terminate on refusal; otherwise continue to approval classification."""
+    # response_text is only set by input_guardrail_node on refusal.
+    if state.get("response_text") is not None:
+        return "__end__"
+    return "approval_check"
+
+
+def _route_after_approval_check(
+    state: OrchestratorState,
+) -> Literal["finalize", "cancel", "agent"]:
+    intent = state.get("intent") or "agent"
+    return intent  # type: ignore[return-value]
+
+
+# ── Graph construction (cached) ──────────────────────────────────────────────
+
+_GRAPH: Any | None = None
+
+
+def _build_orchestrator_graph() -> Any:
+    """Compile the orchestrator state graph. Called once, cached."""
+    # Lazy import to keep module load cheap and tests fast.
+    from langgraph.graph import END, StateGraph
+
+    g: Any = StateGraph(OrchestratorState)
+    g.add_node("input_guardrail", input_guardrail_node)
+    g.add_node("approval_check", approval_check_node)
+    g.add_node("finalize", finalize_node)
+    g.add_node("cancel", cancel_node)
+    g.add_node("agent", agent_node)
+    g.add_node("output_guardrail", output_guardrail_node)
+    g.add_node("format_agent_response", format_agent_response_node)
+
+    g.set_entry_point("input_guardrail")
+    g.add_conditional_edges(
+        "input_guardrail",
+        _route_after_input_guardrail,
+        {"approval_check": "approval_check", "__end__": END},
+    )
+    g.add_conditional_edges(
+        "approval_check",
+        _route_after_approval_check,
+        # Router returns the *intent* literal; map each to the target node.
+        {"approve": "finalize", "cancel": "cancel", "agent": "agent"},
+    )
+    g.add_edge("finalize", END)
+    g.add_edge("cancel", END)
+    g.add_edge("agent", "output_guardrail")
+    g.add_edge("output_guardrail", "format_agent_response")
+    g.add_edge("format_agent_response", END)
+
+    return g.compile()
+
+
+def _get_graph() -> Any:
+    global _GRAPH
+    if _GRAPH is None:
+        _GRAPH = _build_orchestrator_graph()
+    return _GRAPH
+
+
+def reset_graph_cache() -> None:
+    """Clear the compiled-graph cache. Useful in tests."""
+    global _GRAPH
+    _GRAPH = None
+
+
+# ── Public entry point ───────────────────────────────────────────────────────
+
+
+def run_turn(
+    user_text: str,
+    history: list[BaseMessage] | None = None,
+    model_id: str = DEFAULT_MODEL_ID,
+    *,
+    model_factory: ModelFactory | None = None,
+    skip_output_judge: bool | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Run one conversational turn through the orchestrator state graph.
+
+    Args:
+        user_text: raw input from the user.
+        history: prior LangChain messages (empty for first turn).
+        model_id: LiteLLM model identifier.
+        model_factory: optional injection point for tests.
+        skip_output_judge: explicit override; None defers to env-resolution.
+
+    Returns:
+        ``(response_text, debug_info)``. Shape unchanged from prior versions
+        so callers don't need to update.
+    """
+    initial_state: OrchestratorState = {
+        "user_text": user_text,
+        "history": history or [],
+        "model_id": model_id,
+        "model_factory": model_factory,
+        "skip_output_judge": skip_output_judge,
+    }
+    with trace("turn", model=model_id):
+        final_state = _get_graph().invoke(initial_state)
+    return final_state["response_text"], final_state["debug"]

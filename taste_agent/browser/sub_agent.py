@@ -21,35 +21,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from taste_agent.browser.backend import BrowserBackend
 from taste_agent.browser.tools import build_browser_tools, make_request_approval_tool
 from taste_agent.logging_ import get_logger, trace
+from taste_agent.prompts import subagent_prompt
 
 logger = get_logger(__name__)
-
-
-_SUBAGENT_PROMPT = """You are a browser-automation sub-agent. Your job is to fill \
-out a reservation form on a website.
-
-Tools available:
-- browser_navigate(url): open a URL.
-- browser_click(selector): click an element by CSS selector.
-- browser_fill(selector, value): fill a form field.
-- browser_wait_for(selector): wait for an element to appear.
-- browser_dom_snapshot(selector): see the current page (defaults to body).
-- request_user_approval(summary): register the form-ready-to-submit state.
-
-Process:
-1. Navigate to the reservation URL.
-2. Read the page DOM with `browser_dom_snapshot`.
-3. Fill the form (date, time, party size, name, phone) one field at a time.
-4. After every action, you may re-snapshot to verify.
-5. When the form is FULLY filled and the only remaining step is the final \
-submit button, STOP. Call `request_user_approval` with a clear human-readable \
-summary (date, time, party size, name, phone if provided).
-6. DO NOT click the final submit button yourself. The user must approve first; \
-the actual submit happens elsewhere.
-7. After `request_user_approval` returns, output one short confirmation \
-sentence and stop.
-
-Be terse. One tool call per turn. Take the obvious next action."""
 
 
 def run_browser_subagent(
@@ -87,7 +61,7 @@ def run_browser_subagent(
         result = agent.invoke(
             {
                 "messages": [
-                    SystemMessage(content=_SUBAGENT_PROMPT),
+                    SystemMessage(content=subagent_prompt()),
                     HumanMessage(content=goal),
                 ]
             }

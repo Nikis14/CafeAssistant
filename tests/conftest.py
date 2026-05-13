@@ -108,3 +108,19 @@ def _reset_phase3_memory():
     yield
     reset_all_semantic_sessions()
     reset_all_episodic_sessions()
+
+
+@pytest.fixture(autouse=True)
+def _reset_orchestrator_graph():
+    """Drop the compiled-graph singleton between tests.
+
+    The graph closes over the node-function references at compile time, so a
+    test that monkey-patches a node module-attribute would otherwise see
+    nothing — the cached graph still holds the original. Cheap to rebuild;
+    this fixture makes monkey-patching nodes "just work".
+    """
+    from taste_agent.orchestrator import reset_graph_cache
+
+    reset_graph_cache()
+    yield
+    reset_graph_cache()

@@ -6,6 +6,7 @@ are visible to LangChain's auto-tracing.
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -40,8 +41,8 @@ _DEFAULT_LABEL: str = next(
 
 # Per-Gradio-session debug snapshots, keyed by ``gr.Request.session_hash``.
 # The post-turn refresh hook reads from here to render turn-level signals
-# (``n_facts_in_prompt``) without threading them through ChatInterface's
-# return shape. Per-session so two browser tabs don't see each other's stats.
+# (``n_facts_in_prompt``) without threading them through Gradio's return shape.
+# Per-session so two browser tabs don't see each other's stats.
 _LAST_DEBUG_BY_SESSION: dict[str, dict[str, Any]] = {}
 
 
@@ -55,10 +56,13 @@ def _session_id_of(request: gr.Request | None) -> str:
     return request.session_hash or "_default"
 
 
+# ── History adapters ────────────────────────────────────────────────────────
+
+
 def _gradio_history_to_messages(
     history: list[dict[str, str]] | list[tuple[str, str]],
 ) -> list[BaseMessage]:
-    """Convert Gradio ChatInterface history to LangChain messages.
+    """Convert Gradio chatbot history to LangChain messages.
 
     Accepts both the modern messages format (list of ``{"role", "content"}``
     dicts, default since Gradio 4.40) and the legacy tuples format.
@@ -89,10 +93,12 @@ def chat_fn(
     model_label: str,
     request: gr.Request | None = None,
 ) -> str:
-    """Handler wired to gr.ChatInterface.
+    """Run one turn through the orchestrator. Returns the assistant's reply.
 
     Scopes memory to the Gradio session: every browser tab gets its own
-    semantic + episodic stores, so two users can't see each other's facts.
+    semantic + episodic stores. Multiple conversations *within* the same
+    tab share one memory store (same session_hash) — like ChatGPT's
+    "memory persists across chats for the same user".
     """
     sid = _session_id_of(request)
     token = set_session_id(sid)
@@ -105,6 +111,9 @@ def chat_fn(
         return response
     finally:
         reset_session_id(token)
+
+
+# ── Memory snapshots (side panels) ──────────────────────────────────────────
 
 
 def _snapshot_semantic() -> dict[str, str]:
@@ -143,12 +152,132 @@ def _refresh_panels(
         reset_session_id(token)
 
 
+# ── Conversation-list state (within one tab) ────────────────────────────────
+#
+# Gradio doesn't ship a multi-conversation UI; we build one with a
+# ``gr.State`` holding ``{conversation_id: list[message_dict]}`` plus an
+# active-id pointer. Switching conversations swaps the chatbot's value;
+# memory (semantic + episodic) is per-tab and shared across all
+# conversations in that tab — the same model as ChatGPT.
+
+_TITLE_MAXLEN = 40
+
+
+def _new_conversation_id() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+def _title_for(history: list[dict[str, str]]) -> str:
+    """Use the first user message (truncated) as the conversation title."""
+    for msg in history:
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            text = (msg.get("content") or "").strip()
+            if text:
+                if len(text) > _TITLE_MAXLEN:
+                    return text[:_TITLE_MAXLEN] + "..."
+                return text
+    return "New chat"
+
+
+def _conv_choices(
+    conversations: dict[str, list[dict[str, str]]],
+) -> list[tuple[str, str]]:
+    """Build ``gr.Radio`` choices ``[(label, value), ...]`` from the store.
+
+    Most-recently-created appears first so a fresh "New chat" lands on top.
+    Conversations dict preserves insertion order; we reverse it.
+    """
+    items = list(conversations.items())
+    items.reverse()
+    return [
+        (f"{cid[:4]} · {_title_for(history)}", cid)
+        for cid, history in items
+    ]
+
+
+def create_new_conversation(
+    conversations: dict[str, list[dict[str, str]]],
+) -> tuple[Any, ...]:
+    """Wire to the 'New chat' button."""
+    new_id = _new_conversation_id()
+    updated = {**conversations, new_id: []}
+    return (
+        updated,                                         # conversations_state
+        new_id,                                          # active_conv_id
+        [],                                              # chatbot value (empty)
+        gr.update(choices=_conv_choices(updated), value=new_id),  # conv_list radio
+    )
+
+
+def load_conversation(
+    selected_id: str | None,
+    conversations: dict[str, list[dict[str, str]]],
+) -> tuple[list[dict[str, str]], str | None]:
+    """Wire to the conversation-list radio's change event."""
+    if selected_id is None or selected_id not in conversations:
+        return [], None
+    return conversations[selected_id], selected_id
+
+
+def send_message(
+    user_msg: str,
+    chat_history: list[dict[str, str]],
+    conversations: dict[str, list[dict[str, str]]],
+    active_id: str | None,
+    model_label: str,
+    request: gr.Request | None = None,
+) -> tuple[Any, ...]:
+    """Wire to the textbox submit / Send button.
+
+    Auto-creates a conversation on the first send if none is active.
+    """
+    if not user_msg or not user_msg.strip():
+        # No-op: return unchanged state + cleared input
+        return (
+            chat_history,
+            conversations,
+            active_id,
+            gr.update(choices=_conv_choices(conversations), value=active_id),
+            "",
+        )
+
+    # Ensure an active conversation exists
+    if active_id is None or active_id not in conversations:
+        active_id = _new_conversation_id()
+        conversations = {**conversations, active_id: []}
+
+    # Call the orchestrator with the PRIOR conversation history. The current
+    # user message lives in the ``user_msg`` parameter; ``chat_fn`` / agent_node
+    # adds it once to the message list. Appending it here AND passing it
+    # separately would send the same turn to the model twice.
+    response = chat_fn(user_msg, chat_history, model_label, request)
+    history_with_reply = [
+        *chat_history,
+        {"role": "user", "content": user_msg},
+        {"role": "assistant", "content": response},
+    ]
+
+    # Persist
+    updated_conversations = {**conversations, active_id: history_with_reply}
+
+    return (
+        history_with_reply,
+        updated_conversations,
+        active_id,
+        gr.update(choices=_conv_choices(updated_conversations), value=active_id),
+        "",
+    )
+
+
+# ── UI assembly ─────────────────────────────────────────────────────────────
+
+
 def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Taste Agent", theme=gr.themes.Soft()) as app:
         gr.Markdown(
             "# Taste Agent\n"
             "Personalized restaurant & café recommender for Belgrade and beyond. "
-            "Pick a model and ask anything food-related."
+            "Pick a model, start a new chat, or pick a past one from the sidebar."
         )
         model_dropdown = gr.Dropdown(
             choices=_MODEL_LABELS,
@@ -156,21 +285,37 @@ def build_ui() -> gr.Blocks:
             label="Model",
             interactive=True,
         )
+
+        # Per-session state (lives for the lifetime of this browser session)
+        conversations_state = gr.State({})  # dict[conv_id, list[msg]]
+        active_conv_state = gr.State(None)  # str | None
+
         with gr.Row():
-            with gr.Column(scale=3):
-                chat_iface = gr.ChatInterface(
-                    fn=chat_fn,
-                    additional_inputs=[model_dropdown],
-                    type="messages",
-                    chatbot=gr.Chatbot(type="messages", height=500),
-                    examples=[
-                        ["Where can I find the best cappuccino in Belgrade?"],
-                        ["Quiet café for working from with good wifi"],
-                        ["Remember that I'm vegetarian and prefer quiet places"],
-                        ["Recommend a vegetarian-friendly restaurant near Stari Grad"],
-                    ],
+            # ── Left sidebar: conversations ─────────────────────────────
+            with gr.Column(scale=1, min_width=200):
+                gr.Markdown("### Conversations")
+                new_chat_btn = gr.Button("+ New chat", variant="primary")
+                conv_list = gr.Radio(
+                    choices=[],
+                    value=None,
+                    label="Past chats",
+                    interactive=True,
                 )
-            with gr.Column(scale=1):
+
+            # ── Middle: chat ────────────────────────────────────────────
+            with gr.Column(scale=3):
+                chatbot = gr.Chatbot(type="messages", height=500, label="Chat")
+                with gr.Row():
+                    msg_input = gr.Textbox(
+                        placeholder="Ask about restaurants, cafés, reservations...",
+                        show_label=False,
+                        scale=4,
+                        container=False,
+                    )
+                    send_btn = gr.Button("Send", variant="primary", scale=1)
+
+            # ── Right sidebar: memory ───────────────────────────────────
+            with gr.Column(scale=1, min_width=240):
                 gr.Markdown("### What I remember about you")
                 semantic_view = gr.JSON(
                     value=_snapshot_semantic,
@@ -188,13 +333,55 @@ def build_ui() -> gr.Blocks:
                     outputs=[semantic_view, episodic_view, facts_counter],
                 )
 
-        # Auto-refresh: whenever the chatbot value changes (i.e., a turn just
-        # completed) re-render the side panels and the facts-counter line.
-        # This is the live "see memory grow as you talk" pedagogical signal.
-        chat_iface.chatbot.change(
+        # ── Event wiring ────────────────────────────────────────────────
+
+        # New chat: create a fresh conversation id, clear the chatbot.
+        new_chat_btn.click(
+            fn=create_new_conversation,
+            inputs=[conversations_state],
+            outputs=[conversations_state, active_conv_state, chatbot, conv_list],
+        )
+
+        # Picking a conversation from the radio: load its messages.
+        conv_list.change(
+            fn=load_conversation,
+            inputs=[conv_list, conversations_state],
+            outputs=[chatbot, active_conv_state],
+        )
+
+        # Submit: text-input enter OR send button.
+        send_event_inputs = [
+            msg_input,
+            chatbot,
+            conversations_state,
+            active_conv_state,
+            model_dropdown,
+        ]
+        send_event_outputs = [
+            chatbot,
+            conversations_state,
+            active_conv_state,
+            conv_list,
+            msg_input,  # cleared after send
+        ]
+        msg_input.submit(
+            fn=send_message,
+            inputs=send_event_inputs,
+            outputs=send_event_outputs,
+        )
+        send_btn.click(
+            fn=send_message,
+            inputs=send_event_inputs,
+            outputs=send_event_outputs,
+        )
+
+        # Auto-refresh memory panels on every chatbot change (i.e., after each
+        # turn or conversation switch). Live "memory grows as you talk" beat.
+        chatbot.change(
             fn=_refresh_panels,
             outputs=[semantic_view, episodic_view, facts_counter],
         )
+
     return app
 
 

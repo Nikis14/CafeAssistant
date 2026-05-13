@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from taste_agent.guardrails.input import CARD_RE, EMAIL_RE, PHONE_RE
 from taste_agent.logging_ import get_logger, trace
+from taste_agent.prompts import output_judge_prompt
 
 logger = get_logger(__name__)
 
@@ -177,40 +178,8 @@ def redact_output_pii(text: str) -> tuple[str, int, list[str]]:
 
 ModelFactory = Callable[[str], BaseChatModel]
 
-_JUDGE_PROMPT = """You are a careful reviewer of an AI assistant's response.
-
-The assistant answers questions about restaurants and cafés. It has access to
-tools that retrieve real place data. You must judge two things about its
-response:
-
-1. **Factuality**: every concrete place name, address, or claim in the response
-   should be supported by the assistant's available context (tool results,
-   stored memory, user statements). Flag fabricated places, addresses, or
-   strong claims that aren't backed by the context.
-
-2. **Citation hygiene**: every recommended place should be named explicitly
-   (not vague phrases like "a nice spot nearby"). The response should not
-   confidently cite specific opening hours, prices, or phone numbers unless
-   they appear in the context.
-
-Return a JSON object with this exact shape (no Markdown, no preamble):
-
-{{
-  "factuality_ok": true | false,
-  "factuality_concerns": ["short concern", ...],
-  "citation_ok": true | false,
-  "citation_concerns": ["short concern", ...]
-}}
-
-If everything looks fine, return empty concern lists.
-
---- CONTEXT THE ASSISTANT HAD ACCESS TO ---
-{context}
-
---- ASSISTANT RESPONSE ---
-{response}
-
---- JSON JUDGEMENT ---"""
+# The judge prompt is loaded from ``taste_agent/prompts/output_judge.txt`` at
+# render time — see ``output_judge_prompt()`` and the prompts/ README.
 
 
 def _parse_judge_output(raw: str) -> dict[str, object]:
@@ -236,7 +205,7 @@ def _run_judge(
     """Run the LLM judge. Returns (validated_judgement, error_message)."""
     with trace("guardrail:output:judge", model=model_id):
         llm = factory(model_id)
-        prompt = _JUDGE_PROMPT.format(
+        prompt = output_judge_prompt(
             context=context_summary or "(no context provided)",
             response=response_text,
         )
