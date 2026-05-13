@@ -52,6 +52,8 @@ turns. Call this whenever the user shares a preference, allergy, location, \
 or experience worth remembering.
 - memory_read (tool): re-read current semantic facts about the user.
 - memory_search (tool): recall a past dining experience by similarity.
+- web_search (tool): search the open web for current reviews, blog posts, \
+trending places, and anything outside the structured skill data.
 - geocode (tool): resolve a location name to coordinates.
 
 Behavior rules:

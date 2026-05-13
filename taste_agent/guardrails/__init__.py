@@ -49,17 +49,25 @@ from taste_agent.guardrails.action import (
     reset_action_state,
 )
 from taste_agent.guardrails.input import GuardrailResult, run_input_guardrails
+from taste_agent.guardrails.output import (
+    OutputGuardrailResult,
+    redact_output_pii,
+    run_output_guardrails,
+)
 
 __all__ = [
     "ApprovalRequest",
     "GuardrailResult",
+    "OutputGuardrailResult",
     "approve",
     "consume",
     "gate_action",
     "get",
     "get_pending",
     "is_approved",
+    "redact_output_pii",
     "register_pending",
     "reset_action_state",
     "run_input_guardrails",
+    "run_output_guardrails",
 ]

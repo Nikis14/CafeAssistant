@@ -1,19 +1,31 @@
-"""places_search skill — Phase 1 mock implementation.
+"""places_search skill — Foursquare-backed with a mock fallback.
 
-Phase 4 will replace `_MOCK_DATA` and the scoring with Foursquare API calls
-plus Tavily web search and memory-based ranking. The public `run` signature
-is stable so the orchestrator never has to change.
+Production path: Foursquare Places API v3, gated by ``FOURSQUARE_API_KEY``.
+When the key is set, ``run`` issues a real lookup and returns live results.
+When the key is unset (tests, offline demos), the same Belgrade mock fixtures
+ship as in Phase 1. The skill's public contract is the same in both modes.
+
+The two paths share the same ``PlaceResult`` schema so the agent prompt and
+downstream guardrails don't need to know which backend ran.
 """
 
 from __future__ import annotations
 
-from typing import TypedDict
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any, TypedDict
 
 from pydantic import BaseModel
 
 from taste_agent.logging_ import get_logger, trace
 
 logger = get_logger(__name__)
+
+_FOURSQUARE_KEY_ENV = "FOURSQUARE_API_KEY"
+_FOURSQUARE_SEARCH_URL = "https://api.foursquare.com/v3/places/search"
 
 
 class PlaceFixture(TypedDict):
@@ -32,8 +44,8 @@ class PlaceResult(BaseModel):
     review_snippet: str | None = None
 
 
-# Static fixtures for Phase 1. Each entry has tags the scorer matches against
-# the user's query. Tags are loose and overlap intentionally.
+# Static fixtures (Phase 1). Used as the fallback when no Foursquare key is set
+# AND in tests. Tags are loose and overlap intentionally.
 _MOCK_DATA: list[PlaceFixture] = [
     {
         "name": "Kafeterija",
@@ -74,14 +86,113 @@ _MOCK_DATA: list[PlaceFixture] = [
 ]
 
 
+# ── Foursquare backend ───────────────────────────────────────────────────────
+
+
+def _format_foursquare_address(loc: dict[str, Any]) -> str:
+    """Render a Foursquare ``location`` block as a single-line address."""
+    parts = [
+        loc.get("address"),
+        loc.get("locality"),
+        loc.get("country"),
+    ]
+    return ", ".join(p for p in parts if isinstance(p, str) and p)
+
+
+def _foursquare_search(
+    query: str, location: str, max_results: int, api_key: str
+) -> list[dict[str, object]]:
+    """Call Foursquare Places v3. Raises ``urllib.error.URLError`` on failure."""
+    params = urllib.parse.urlencode(
+        {
+            "query": query,
+            "near": location,
+            "limit": min(max_results, 50),
+            "categories": "13000",  # Food & Beverage top-level category
+        }
+    )
+    req = urllib.request.Request(
+        f"{_FOURSQUARE_SEARCH_URL}?{params}",
+        headers={
+            "Authorization": api_key,
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        payload = json.load(resp)
+
+    raw_results = payload.get("results", []) if isinstance(payload, dict) else []
+    formatted: list[dict[str, object]] = []
+    for r in raw_results[:max_results]:
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("name", ""))
+        address = _format_foursquare_address(r.get("location", {}) or {})
+        # Phase 4 ships without per-place reviews from Foursquare (would need a
+        # second API call per result). Surfacing the categories as a reason
+        # keeps the result structure populated.
+        categories = r.get("categories", []) or []
+        cat_names = [c.get("name") for c in categories if isinstance(c, dict)]
+        reason = (
+            f"Foursquare match: {', '.join(c for c in cat_names if c)}"
+            if cat_names
+            else "Foursquare match"
+        )
+        formatted.append(
+            PlaceResult(
+                name=name,
+                address=address,
+                reason=reason,
+                review_snippet=None,
+            ).model_dump()
+        )
+    return formatted
+
+
+# ── Mock backend (Phase 1) ───────────────────────────────────────────────────
+
+
 def _score(query: str, place: PlaceFixture) -> int:
     """Number of tag hits in the query. Higher is better."""
     q = query.lower()
     return sum(1 for tag in place["tags"] if tag in q)
 
 
+def _mock_search(
+    query: str, location: str, max_results: int
+) -> list[dict[str, object]]:
+    logger.debug("mock places search: query=%r location=%r", query, location)
+    scored: list[tuple[int, PlaceFixture]] = [(_score(query, p), p) for p in _MOCK_DATA]
+    generic = any(w in query.lower() for w in ("place", "where", "somewhere"))
+    if not generic:
+        scored = [(s, p) for s, p in scored if s > 0]
+    scored.sort(key=lambda x: -x[0])
+
+    results: list[dict[str, object]] = []
+    for score, place in scored[:max_results]:
+        matched_tags = [t for t in place["tags"] if t in query.lower()]
+        reason = f"Matches: {', '.join(matched_tags)}" if matched_tags else "General fit"
+        results.append(
+            PlaceResult(
+                name=place["name"],
+                address=place["address"],
+                reason=reason,
+                review_snippet=place["review"],
+            ).model_dump()
+        )
+        logger.debug("candidate score=%d name=%s", score, place["name"])
+    return results
+
+
+# ── Public entry point ───────────────────────────────────────────────────────
+
+
 def run(query: str, location: str = "Belgrade", max_results: int = 5) -> list[dict[str, object]]:
     """Search for places matching ``query`` in ``location``.
+
+    If ``FOURSQUARE_API_KEY`` is set, queries Foursquare Places v3.
+    Otherwise (or on any API error), falls back to the Belgrade mock data so
+    tests and offline demos keep working.
 
     Args:
         query: free-form description of what the user wants.
@@ -92,29 +203,28 @@ def run(query: str, location: str = "Belgrade", max_results: int = 5) -> list[di
         List of result dicts with keys: name, address, reason, review_snippet.
     """
     with trace("skill:places_search", query=query, location=location):
-        logger.debug("searching mock data: query=%r location=%r", query, location)
+        api_key = os.environ.get(_FOURSQUARE_KEY_ENV)
+        if api_key:
+            # Production path: real Foursquare. If the API call fails, return
+            # an empty list rather than the Belgrade mock — the mock data is
+            # Belgrade-only, so quietly substituting it for a query about
+            # Istanbul (or any other city) would surface fabricated results.
+            # Explicit empty result is the honest signal.
+            try:
+                results = _foursquare_search(query, location, max_results, api_key)
+                logger.info(
+                    "places_search via Foursquare returned %d result(s)", len(results)
+                )
+                return results
+            except (urllib.error.URLError, urllib.error.HTTPError, ValueError, KeyError) as e:
+                logger.warning(
+                    "Foursquare search failed: %s; returning empty (mock would be Belgrade-only)",
+                    e,
+                )
+                return []
 
-        scored: list[tuple[int, PlaceFixture]] = [(_score(query, p), p) for p in _MOCK_DATA]
-        # Drop zero-score entries unless the query is generic ("place", "cafe", "where")
-        generic = any(w in query.lower() for w in ("place", "where", "somewhere"))
-        if not generic:
-            scored = [(s, p) for s, p in scored if s > 0]
-
-        scored.sort(key=lambda x: -x[0])
-
-        results: list[dict[str, object]] = []
-        for score, place in scored[:max_results]:
-            matched_tags = [t for t in place["tags"] if t in query.lower()]
-            reason = f"Matches: {', '.join(matched_tags)}" if matched_tags else "General fit"
-            results.append(
-                PlaceResult(
-                    name=place["name"],
-                    address=place["address"],
-                    reason=reason,
-                    review_snippet=place["review"],
-                ).model_dump()
-            )
-            logger.debug("candidate score=%d name=%s", score, place["name"])
-
-        logger.info("places_search returned %d result(s)", len(results))
+        # Offline / demo path: no key set → Belgrade-only mock data is OK
+        # because there's no expectation of real coverage.
+        results = _mock_search(query, location, max_results)
+        logger.info("places_search via mock returned %d result(s)", len(results))
         return results

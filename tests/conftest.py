@@ -22,6 +22,10 @@ if str(_PROJECT_ROOT) not in sys.path:
 # ``EpisodicMemory`` construction triggered by test imports.
 os.environ.setdefault("TASTE_AGENT_FAKE_EMBEDDING", "1")
 
+# Skip the LLM judge in the output guardrail by default. Tests that want to
+# exercise the judge path inject a deterministic fake JSON-returning model.
+os.environ.setdefault("TASTE_AGENT_SKIP_OUTPUT_JUDGE", "1")
+
 
 @pytest.fixture
 def capture_logs() -> StringIO:

@@ -15,13 +15,20 @@ from collections.abc import Callable
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from taste_agent.config import DEFAULT_MODEL_ID, SKILLS_DIR
 from taste_agent.guardrails import (
     approve,
     get_pending,
     run_input_guardrails,
+    run_output_guardrails,
 )
 from taste_agent.logging_ import get_logger, trace
 from taste_agent.memory import get_default_semantic
@@ -31,7 +38,7 @@ from taste_agent.skills.reserve_table.reserve_table import (
     cancel_reservation,
     finalize_reservation,
 )
-from taste_agent.tools import geocode, memory_read, memory_search
+from taste_agent.tools import geocode, memory_read, memory_search, web_search
 
 logger = get_logger(__name__)
 
@@ -64,7 +71,7 @@ def _build_agent_uncached(model_id: str, factory: ModelFactory) -> Any:
     from langchain.agents import create_agent
 
     skills = load_all_skills(SKILLS_DIR)
-    tools = [geocode, memory_read, memory_search, *skills]
+    tools = [geocode, memory_read, memory_search, web_search, *skills]
     llm = factory(model_id)
     return create_agent(llm, tools)
 
@@ -145,6 +152,69 @@ def _count_tool_calls(messages: list[BaseMessage]) -> int:
     return count
 
 
+def _build_output_context(
+    messages: list[BaseMessage],
+    facts: dict[str, str] | None = None,
+    *,
+    max_chars: int = 6000,
+    per_tool_chars: int = 2500,
+) -> str:
+    """Summarize the conversation context for the output guardrail's LLM judge.
+
+    Includes:
+    - **Injected memory facts** — the judge sees these because answers grounded
+      in semantic memory (e.g. "since you're vegetarian, try X") would
+      otherwise look unsupported and produce false factuality flags.
+    - **User messages** — primary grounding for what was asked.
+    - **Tool messages** — primary grounding for what was retrieved.
+
+    Deliberately excludes the *base* system prompt (it guides the agent, it's
+    not a factuality source) and intermediate ``AIMessage`` content (not
+    ground truth — it's the agent's own reasoning).
+    """
+    parts: list[str] = []
+    if facts:
+        facts_str = "; ".join(f"{k}={v}" for k, v in sorted(facts.items()))
+        parts.append(f"known user facts (semantic memory): {facts_str}")
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            parts.append(f"user: {m.content}")
+        elif isinstance(m, ToolMessage):
+            name = getattr(m, "name", "tool")
+            content = str(m.content)[:per_tool_chars]
+            parts.append(f"tool[{name}]: {content}")
+    summary = "\n".join(parts)
+    if len(summary) > max_chars:
+        summary = summary[: max_chars - 3] + "..."
+    return summary
+
+
+def _format_output_note(out_guard: object) -> str:
+    """Render a one-line note about guardrail concerns to append to the reply.
+
+    Prefixes each note with the *surface* that caught it (``[pii]``,
+    ``[judge:factuality]``, ``[judge:citation]``) so demos make the source
+    of each concern obvious. Renders only when there's something worth
+    surfacing; we deliberately suppress factuality/citation concerns when
+    the corresponding ``*_ok`` flag is True, since concerns without a fail
+    flag are advisory not actionable.
+    """
+    from taste_agent.guardrails import OutputGuardrailResult
+
+    if not isinstance(out_guard, OutputGuardrailResult) or not out_guard.has_concerns:
+        return ""
+    notes: list[str] = []
+    if out_guard.pii_concerns:
+        notes.append(f"[pii] stripped: {', '.join(out_guard.pii_concerns)}")
+    if not out_guard.factuality_ok and out_guard.factuality_concerns:
+        notes.append(f"[judge:factuality] {'; '.join(out_guard.factuality_concerns)}")
+    if not out_guard.citation_ok and out_guard.citation_concerns:
+        notes.append(f"[judge:citation] {'; '.join(out_guard.citation_concerns)}")
+    if not notes:
+        return ""
+    return "\n\n_Output guardrail:_ " + " | ".join(notes)
+
+
 def _extract_text(message: BaseMessage) -> str:
     """Pull the user-visible text out of a message content payload.
 
@@ -173,6 +243,7 @@ def run_turn(
     model_id: str = DEFAULT_MODEL_ID,
     *,
     model_factory: ModelFactory | None = None,
+    skip_output_judge: bool | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Run one conversational turn through the full pipeline.
 
@@ -266,10 +337,27 @@ def run_turn(
         with trace("agent:invoke", n_messages=len(messages)):
             result = agent.invoke({"messages": messages})
 
-        # 4. Extract response (Phase 4 wires the output guardrail here)
+        # 4. Extract response from the agent's final message.
         all_msgs: list[BaseMessage] = result["messages"]
         final = all_msgs[-1]
-        response_text = _extract_text(final) if isinstance(final, AIMessage) else str(final.content)
+        response_text = (
+            _extract_text(final) if isinstance(final, AIMessage) else str(final.content)
+        )
+
+        # 4b. Output guardrails: PII redaction (always) + LLM judge for
+        # factuality + citation (env-controlled). The judge model is resolved
+        # inside run_output_guardrails — see resolve_judge_model_id() — and
+        # auto-skips when no judge provider key is available. The context
+        # passed in includes the memory facts so grounded answers like
+        # "since you're vegetarian..." don't get falsely flagged.
+        out_factory = model_factory or _default_model_factory
+        out_guard = run_output_guardrails(
+            response_text,
+            context_summary=_build_output_context(all_msgs, facts=facts),
+            model_factory=out_factory,
+            skip_judge=skip_output_judge,
+        )
+        response_text = out_guard.response_text + _format_output_note(out_guard)
 
         debug: dict[str, Any] = {
             "refused": False,
@@ -278,6 +366,7 @@ def run_turn(
             "tool_calls": _count_tool_calls(all_msgs),
             "n_messages": len(all_msgs),
             "n_facts_in_prompt": len(facts),
+            "output_guard": out_guard.summary_for_debug(),
         }
 
         # 5. If a *new* pending action was created during this turn, ensure the
