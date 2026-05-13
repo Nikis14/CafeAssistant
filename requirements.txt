@@ -15,6 +15,16 @@ langgraph>=0.6.0
 langchain-litellm>=0.2.0
 litellm>=1.50.0
 
+# Vector store for episodic memory (Phase 3)
+chromadb>=1.5.0
+langchain-chroma>=1.1.0
+# Required for langchain-chroma's transitive opentelemetry imports
+opentelemetry-api>=1.40.0
+# HuggingFace sentence-transformers for production episodic embeddings.
+# Tests bypass via TASTE_AGENT_FAKE_EMBEDDING=1.
+langchain-huggingface>=1.2.0
+sentence-transformers>=3.0.0
+
 # UI
 gradio>=4.40.0
 

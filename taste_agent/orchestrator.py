@@ -24,13 +24,14 @@ from taste_agent.guardrails import (
     run_input_guardrails,
 )
 from taste_agent.logging_ import get_logger, trace
+from taste_agent.memory import get_default_semantic
 from taste_agent.prompts import system_prompt
 from taste_agent.skill_loader import load_all_skills
 from taste_agent.skills.reserve_table.reserve_table import (
     cancel_reservation,
     finalize_reservation,
 )
-from taste_agent.tools import geocode
+from taste_agent.tools import geocode, memory_read, memory_search
 
 logger = get_logger(__name__)
 
@@ -63,7 +64,7 @@ def _build_agent_uncached(model_id: str, factory: ModelFactory) -> Any:
     from langchain.agents import create_agent
 
     skills = load_all_skills(SKILLS_DIR)
-    tools = [geocode, *skills]
+    tools = [geocode, memory_read, memory_search, *skills]
     llm = factory(model_id)
     return create_agent(llm, tools)
 
@@ -93,9 +94,7 @@ def reset_agent_cache() -> None:
 _APPROVE_WORDS = frozenset(
     {"yes", "y", "confirm", "ok", "okay", "sure", "proceed", "approve", "approved"}
 )
-_CANCEL_WORDS = frozenset(
-    {"no", "n", "cancel", "stop", "abort", "nope", "nevermind"}
-)
+_CANCEL_WORDS = frozenset({"no", "n", "cancel", "stop", "abort", "nope", "nevermind"})
 
 
 _MAX_INTENT_TOKENS = 3
@@ -253,8 +252,14 @@ def run_turn(
         # the time at build time. Trade-off: LangSmith shows the prompt as an
         # inline message rather than the agent's system slot. A callable
         # prompt would also work and is worth revisiting in Phase 4.
+        #
+        # We also inject the user's known semantic facts here so the agent
+        # always has context about preferences/dietary/etc. without having
+        # to call memory_read on every turn. memory_read remains available
+        # for re-reads mid-turn (e.g., right after a memorize call).
+        facts = get_default_semantic().as_dict()
         messages: list[BaseMessage] = [
-            SystemMessage(content=system_prompt()),
+            SystemMessage(content=system_prompt(facts=facts)),
             *history,
             HumanMessage(content=guard.cleaned_text),
         ]
@@ -272,6 +277,7 @@ def run_turn(
             "out_of_scope": guard.out_of_scope,
             "tool_calls": _count_tool_calls(all_msgs),
             "n_messages": len(all_msgs),
+            "n_facts_in_prompt": len(facts),
         }
 
         # 5. If a *new* pending action was created during this turn, ensure the

@@ -1,4 +1,4 @@
-"""System prompts. Time is injected here — see CLAUDE.md."""
+"""System prompts. Time and known-facts are injected here — see CLAUDE.md."""
 
 from __future__ import annotations
 
@@ -8,12 +8,29 @@ from zoneinfo import ZoneInfo
 from taste_agent.config import DEFAULT_TIMEZONE
 
 
-def system_prompt(tz: str = DEFAULT_TIMEZONE, now: datetime | None = None) -> str:
-    """Build the system prompt with current time injected.
+def _render_facts(facts: dict[str, str] | None) -> str:
+    if not facts:
+        return ""
+    lines = "\n".join(f"- {k}: {v}" for k, v in sorted(facts.items()))
+    return (
+        "\n\nWhat you know about the user (from prior conversations):\n"
+        f"{lines}\n"
+        "Use these facts to tailor recommendations. Do not parrot them back at "
+        "the user unless they ask — just let them shape your choices."
+    )
+
+
+def system_prompt(
+    tz: str = DEFAULT_TIMEZONE,
+    now: datetime | None = None,
+    facts: dict[str, str] | None = None,
+) -> str:
+    """Build the system prompt with current time + known user facts injected.
 
     Args:
         tz: IANA timezone name.
         now: override for tests; defaults to current time in tz.
+        facts: dict of ``{key: value}`` semantic facts from long-term memory.
     """
     current = now if now is not None else datetime.now(ZoneInfo(tz))
     city = tz.split("/")[-1].replace("_", " ")
@@ -23,14 +40,23 @@ def system_prompt(tz: str = DEFAULT_TIMEZONE, now: datetime | None = None) -> st
 Current time: {current.strftime("%Y-%m-%d %H:%M")} {tz}
 Default city: {city}
 
-You help the user find places to eat and drink, and (when asked) make reservations.
+You help the user find places to eat and drink, make reservations, and \
+remember their preferences across conversations.
 
 Tools and skills available:
 - places_search (skill): find restaurants, cafés, bars matching a user request.
+- reserve_table (skill): make a reservation at a specific place; STOPS at \
+user-confirmation for the final submit.
+- memorize (skill): persist user preferences and dining experiences for future \
+turns. Call this whenever the user shares a preference, allergy, location, \
+or experience worth remembering.
+- memory_read (tool): re-read current semantic facts about the user.
+- memory_search (tool): recall a past dining experience by similarity.
 - geocode (tool): resolve a location name to coordinates.
 
 Behavior rules:
 - Be concise. Two to four sentences plus a short list when recommending.
 - Cite every place you recommend by name and neighborhood.
 - Never fabricate a place. If you don't have data, say so.
-- If the request is outside food/drink/places, politely steer back."""
+- If the user shares a preference or allergy, call `memorize` so it sticks.
+- If the request is outside food/drink/places, politely steer back.{_render_facts(facts)}"""

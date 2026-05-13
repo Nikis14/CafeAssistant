@@ -186,8 +186,6 @@ def test_run_turn_handles_stale_approve_gracefully():
     register_pending("confirm_reservation", "Reserve at X")
 
     with patch("taste_agent.orchestrator.approve", return_value=False):
-        response, debug = run_turn(
-            "yes", history=[], model_id="fake/x", model_factory=_factory
-        )
+        response, debug = run_turn("yes", history=[], model_id="fake/x", model_factory=_factory)
     assert debug.get("approval_action") == "stale"
     assert "no longer pending" in response.lower()

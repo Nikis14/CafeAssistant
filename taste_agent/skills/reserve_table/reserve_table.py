@@ -230,9 +230,7 @@ def _run_impl(
         )
 
         try:
-            result = run_browser_subagent(
-                goal=goal, backend=backend, model_factory=model_factory
-            )
+            result = run_browser_subagent(goal=goal, backend=backend, model_factory=model_factory)
         except Exception:
             # Sub-agent crashed — drop the forbid so the backend is reusable.
             backend.forbidden_selectors.discard(_DEFAULT_SUBMIT_SELECTOR)

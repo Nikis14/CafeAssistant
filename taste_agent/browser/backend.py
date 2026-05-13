@@ -85,9 +85,7 @@ class MockBrowserBackend:
         self.calls.append(("fill", {"selector": selector, "value": value}))
 
     def wait_for(self, selector: str, timeout_ms: int = 5000) -> None:
-        self.calls.append(
-            ("wait_for", {"selector": selector, "timeout_ms": timeout_ms})
-        )
+        self.calls.append(("wait_for", {"selector": selector, "timeout_ms": timeout_ms}))
 
     def screenshot(self) -> bytes:
         self.calls.append(("screenshot", {}))

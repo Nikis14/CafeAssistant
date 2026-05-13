@@ -111,9 +111,7 @@ def run_browser_subagent(
         text = str(last_content)
 
     actions = getattr(backend, "calls", [])
-    logger.info(
-        "sub-agent finished: %d messages, %d backend actions", len(messages), len(actions)
-    )
+    logger.info("sub-agent finished: %d messages, %d backend actions", len(messages), len(actions))
 
     return {
         "messages": messages,
