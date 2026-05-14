@@ -109,6 +109,25 @@ def _render_booking_context(booking_values: dict[str, str] | None) -> str:
     )
 
 
+def _render_web_search_tool_section(include_web_search: bool) -> str:
+    if not include_web_search:
+        return ""
+    return (
+        "\n- web_search (tool): use this for explicit general web tasks like reviews, "
+        "current hours, articles, or what people are saying about a place. Do not "
+        "use it as the default venue-finding tool when `place_discovery` already fits."
+    )
+
+
+def _render_web_search_rule_section(include_web_search: bool) -> str:
+    if not include_web_search:
+        return ""
+    return (
+        "\n- Use `web_search` only when the user explicitly asks for general web evidence "
+        "like reviews, current hours, articles, menus, or what people are saying."
+    )
+
+
 # ── Public render functions ──────────────────────────────────────────────────
 
 
@@ -118,6 +137,7 @@ def system_prompt(
     facts: dict[str, str] | None = None,
     patterns_text: str | None = None,
     booking_values: dict[str, str] | None = None,
+    include_web_search: bool = False,
 ) -> str:
     """Render the orchestrator's system prompt for this turn.
 
@@ -134,6 +154,8 @@ def system_prompt(
         timestamp=current.strftime("%Y-%m-%d %H:%M"),
         timezone=tz,
         city=city,
+        web_search_tools_section=_render_web_search_tool_section(include_web_search),
+        web_search_rule_section=_render_web_search_rule_section(include_web_search),
         facts_section=_render_facts(facts),
         patterns_section=_render_patterns(patterns_text),
         booking_context_section=_render_booking_context(booking_values),

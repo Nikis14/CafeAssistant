@@ -30,7 +30,7 @@ def test_place_discovery_merges_places_and_web(monkeypatch):
             }
         ]
 
-    class _FallbackTool:
+    class _EnrichmentTool:
         @staticmethod
         def invoke(payload):
             assert payload["location"] == "Belgrade"
@@ -44,13 +44,13 @@ def test_place_discovery_merges_places_and_web(monkeypatch):
                     "reservation_url": "",
                     "phone": "",
                     "maps_url": "https://maps.example/moskva",
-                    "source": "web_fallback",
+                    "source": "web_enrichment",
                     "status": "ok",
                 }
             ]
 
     monkeypatch.setattr(_mod, "places_search_run", fake_places)
-    monkeypatch.setattr(_mod, "place_web_fallback", _FallbackTool())
+    monkeypatch.setattr(_mod, "place_web_enrichment", _EnrichmentTool())
 
     result = place_discovery.invoke(
         {"query": "nice restaurant with good coffee", "location": "Belgrade"}
@@ -81,7 +81,7 @@ def test_place_discovery_returns_web_when_places_fail(monkeypatch):
             }
         ]
 
-    class _FallbackTool:
+    class _EnrichmentTool:
         @staticmethod
         def invoke(payload):
             return [
@@ -94,16 +94,62 @@ def test_place_discovery_returns_web_when_places_fail(monkeypatch):
                     "reservation_url": "",
                     "phone": "",
                     "maps_url": "",
-                    "source": "web_fallback",
+                    "source": "web_enrichment",
                     "status": "ok",
                 }
             ]
 
     monkeypatch.setattr(_mod, "places_search_run", fake_places)
-    monkeypatch.setattr(_mod, "place_web_fallback", _FallbackTool())
+    monkeypatch.setattr(_mod, "place_web_enrichment", _EnrichmentTool())
 
     result = place_discovery.invoke({"query": "coffee", "location": "Belgrade"})
 
     assert len(result) == 1
     assert result[0]["name"] == "Sonder Roastery"
-    assert result[0]["source"] == "web_fallback"
+    assert result[0]["source"] == "web_enrichment"
+
+
+def test_place_discovery_preserves_both_error_paths(monkeypatch):
+    def fake_places(query: str, location: str, max_results: int):
+        return [
+            {
+                "name": "",
+                "address": "Belgrade",
+                "reason": "Places API unavailable.",
+                "review_snippet": None,
+                "website_url": "",
+                "reservation_url": "",
+                "phone": "",
+                "maps_url": "",
+                "source": "error",
+                "status": "error",
+            }
+        ]
+
+    class _EnrichmentTool:
+        @staticmethod
+        def invoke(payload):
+            return [
+                {
+                    "name": "",
+                    "address": "Belgrade",
+                    "reason": "Web enrichment found no reliable place candidates.",
+                    "review_snippet": None,
+                    "website_url": "",
+                    "reservation_url": "",
+                    "phone": "",
+                    "maps_url": "",
+                    "source": "error",
+                    "status": "error",
+                }
+            ]
+
+    monkeypatch.setattr(_mod, "places_search_run", fake_places)
+    monkeypatch.setattr(_mod, "place_web_enrichment", _EnrichmentTool())
+
+    result = place_discovery.invoke({"query": "coffee", "location": "Belgrade"})
+
+    assert len(result) == 1
+    assert result[0]["source"] == "error"
+    assert "Places API unavailable." in result[0]["reason"]
+    assert "Web enrichment found no reliable place candidates." in result[0]["reason"]

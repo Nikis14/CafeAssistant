@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
-from taste_agent.logging_ import get_logger, trace
+from taste_agent.logging_ import debug_enter, debug_exit, get_logger, trace
 from taste_agent.memory import get_default_semantic
 
 logger = get_logger(__name__)
@@ -24,7 +24,9 @@ def memory_read() -> dict[str, str]:
     ``dietary``, ``city``, ``favorite_cuisine``, ``budget_pref``, ``ambience_pref``.
     Empty dict if nothing has been memorized yet.
     """
+    debug_enter("memory_read")
     with trace("tool:memory_read"):
         facts = get_default_semantic().as_dict()
         logger.debug("memory_read returned %d fact(s)", len(facts))
+        debug_exit("memory_read", result=facts)
         return facts

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
-from taste_agent.logging_ import get_logger, trace
+from taste_agent.logging_ import debug_enter, debug_exit, get_logger, trace
 from taste_agent.memory import get_default_episodic
 
 logger = get_logger(__name__)
@@ -36,9 +36,14 @@ def memory_search(query: str, k: int = 5) -> list[dict[str, object]]:
         List of event dicts with: place_name, notes, rating (if any),
         date (ISO), address, cuisine. Ordered by relevance.
     """
+    debug_enter("memory_search", query=query, k=k)
     with trace("tool:memory_search", query=query[:60], k=k):
         events = get_default_episodic().search(query, k=k)
         logger.debug("memory_search returned %d event(s)", len(events))
         if not events:
-            return _sentinel_event(query)
-        return [e.model_dump(exclude_none=True) for e in events]
+            result = _sentinel_event(query)
+            debug_exit("memory_search", result=result)
+            return result
+        result = [e.model_dump(exclude_none=True) for e in events]
+        debug_exit("memory_search", result=result)
+        return result

@@ -184,3 +184,13 @@ def test_no_api_key_uses_mock(monkeypatch):
     names = {r["name"] for r in results}
     assert "Koffein" in names  # mock fixture
     assert all(r["source"] == "mock" for r in results)
+
+
+def test_no_api_key_without_runtime_mocks_returns_sentinel(monkeypatch):
+    monkeypatch.delenv(_FOURSQUARE_KEY_ENV, raising=False)
+    monkeypatch.setenv("TASTE_AGENT_ALLOW_RUNTIME_MOCKS", "0")
+    monkeypatch.setattr(_ps_module, "ALLOW_RUNTIME_MOCKS", False)
+    results = places_search_run("cappuccino", "Belgrade", 5)
+    assert len(results) == 1
+    assert results[0]["source"] == "error"
+    assert "no live Places API configured" in results[0]["reason"]

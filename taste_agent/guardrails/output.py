@@ -25,7 +25,7 @@ students see the cost surface.
 Judge model resolution (see ``resolve_judge_model_id``):
   1. ``TASTE_AGENT_SKIP_OUTPUT_JUDGE=1`` → skip
   2. ``TASTE_AGENT_JUDGE_MODEL_ID=<litellm_id>`` → use that model
-  3. ``MISTRAL_API_KEY`` set → ``mistral/mistral-medium-3-5``
+  3. ``OPENAI_API_KEY`` set → ``openai/gpt-5-nano``
   4. ``ANTHROPIC_API_KEY`` set → ``anthropic/claude-haiku-4-5`` (fallback)
   5. Otherwise → skip (no key for the default judge)
 
@@ -54,8 +54,8 @@ logger = get_logger(__name__)
 # Env vars controlling judge behavior
 _JUDGE_SKIP_ENV = "TASTE_AGENT_SKIP_OUTPUT_JUDGE"
 _JUDGE_MODEL_ENV = "TASTE_AGENT_JUDGE_MODEL_ID"
-_DEFAULT_JUDGE_MODEL_ID = "mistral/mistral-medium-3-5"
-_DEFAULT_JUDGE_KEY_ENV = "MISTRAL_API_KEY"
+_DEFAULT_JUDGE_MODEL_ID = "openai/gpt-5-nano"
+_DEFAULT_JUDGE_KEY_ENV = "OPENAI_API_KEY"
 _FALLBACK_JUDGE_MODEL_ID = "anthropic/claude-haiku-4-5"
 _FALLBACK_JUDGE_KEY_ENV = "ANTHROPIC_API_KEY"
 
@@ -130,6 +130,8 @@ class OutputGuardrailResult:
     citation_concerns: list[str] = field(default_factory=list)
     internal_error_rewritten: bool = False
     internal_error_concerns: list[str] = field(default_factory=list)
+    judge_rewritten: bool = False
+    judge_rewrite_reason: str | None = None
     judge_skipped: bool = False
     judge_error: str | None = None
 
@@ -152,6 +154,8 @@ class OutputGuardrailResult:
             "citation_concerns": self.citation_concerns,
             "internal_error_rewritten": self.internal_error_rewritten,
             "internal_error_concerns": self.internal_error_concerns,
+            "judge_rewritten": self.judge_rewritten,
+            "judge_rewrite_reason": self.judge_rewrite_reason,
             "judge_skipped": self.judge_skipped,
             "judge_error": self.judge_error,
         }
@@ -288,6 +292,32 @@ def _run_judge(
             return None, f"llm-error: {e}"
 
 
+def _rewrite_on_judge_failure(
+    text: str,
+    *,
+    factuality_ok: bool,
+    citation_ok: bool,
+) -> tuple[str, bool, str | None]:
+    """Replace a judged-bad draft with a grounded fallback.
+
+    The judge has already determined the draft overclaims or cites unsupported
+    specifics. At that point the safe move is to stop the bad draft from
+    reaching the user rather than merely annotate it in debug output.
+    """
+    if factuality_ok and citation_ok:
+        return text, False, None
+    if not factuality_ok:
+        reason = "factuality"
+    else:
+        reason = "citation"
+    rewritten = (
+        "I couldn't verify enough of that reply from grounded results to say it "
+        "confidently. I can keep checking with confirmed sources, or help with "
+        "another place once I verify it."
+    )
+    return rewritten, True, reason
+
+
 # ── Public entry point ───────────────────────────────────────────────────────
 
 
@@ -354,8 +384,13 @@ def run_output_guardrails(
                 judge_error=err,
             )
 
+        final_text, judge_rewritten, judge_rewrite_reason = _rewrite_on_judge_failure(
+            cleaned,
+            factuality_ok=payload.factuality_ok,
+            citation_ok=payload.citation_ok,
+        )
         return OutputGuardrailResult(
-            response_text=cleaned,
+            response_text=final_text,
             pii_leaked=n_pii,
             pii_concerns=pii_concerns,
             factuality_ok=payload.factuality_ok,
@@ -364,5 +399,7 @@ def run_output_guardrails(
             citation_concerns=list(payload.citation_concerns),
             internal_error_rewritten=internal_rewritten,
             internal_error_concerns=internal_concerns,
+            judge_rewritten=judge_rewritten,
+            judge_rewrite_reason=judge_rewrite_reason,
             judge_skipped=False,
         )

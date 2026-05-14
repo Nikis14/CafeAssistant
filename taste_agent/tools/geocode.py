@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
-from taste_agent.logging_ import get_logger, trace
+from taste_agent.config import ALLOW_RUNTIME_MOCKS
+from taste_agent.logging_ import debug_enter, debug_exit, get_logger, trace
 
 logger = get_logger(__name__)
 
@@ -32,11 +33,23 @@ def geocode(location: str) -> dict[str, float | str]:
         fallback for unknown locations (Phase 1 behavior — Phase 4 returns an
         explicit "not found" status).
     """
+    debug_enter("geocode", location=location)
     with trace("tool:geocode", location=location):
+        if not ALLOW_RUNTIME_MOCKS:
+            result: dict[str, float | str] = {
+                "lat": 0.0,
+                "lng": 0.0,
+                "normalized_name": location,
+                "status": "error",
+                "reason": "Geocoding unavailable: no live geocoder configured.",
+            }
+            debug_exit("geocode", result=result)
+            return result
         key = location.lower().strip()
         result = _MOCK_PLACES.get(
             key,
             {"lat": 44.787, "lng": 20.457, "normalized_name": location},
         )
         logger.debug("geocode %r -> %s", location, result)
+        debug_exit("geocode", result=result)
         return result

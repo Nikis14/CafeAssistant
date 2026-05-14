@@ -1,4 +1,4 @@
-from taste_agent.browser.backend import BrowserBackend, MockBrowserBackend
+from taste_agent.browser.backend import BrowserBackend, MockBrowserBackend, PlaywrightBrowserBackend
 from taste_agent.browser.parser_cache import (
     clear_cache,
     format_trace,
@@ -18,6 +18,7 @@ __all__ = [
     "BookingFlowStep",
     "BrowserBackend",
     "MockBrowserBackend",
+    "PlaywrightBrowserBackend",
     "build_browser_tools",
     "clear_cache",
     "clear_spec_cache",

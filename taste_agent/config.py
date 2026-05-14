@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 
@@ -25,7 +26,8 @@ MODEL_REGISTRY: list[ModelChoice] = [
     ModelChoice("Claude Haiku 4.5", "anthropic/claude-haiku-4-5", "ANTHROPIC_API_KEY"),
 ]
 
-DEFAULT_MODEL_ID: str = "mistral/mistral-small-latest"
+DEFAULT_MODEL_ID: str = "openai/gpt-5-nano"
+ALLOW_RUNTIME_MOCKS: bool = os.environ.get("TASTE_AGENT_ALLOW_RUNTIME_MOCKS") == "1"
 
 # Filesystem layout
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent

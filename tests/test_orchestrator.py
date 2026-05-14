@@ -14,10 +14,13 @@ from taste_agent.orchestrator import (
     _extract_text,
     _format_output_note,
     _get_agent_parts,
+    _should_expose_web_search,
+    _wrap_tool_for_turn,
     build_agent,
     reset_agent_cache,
 )
 from tests.fakes import FakeAgentModel
+from langchain_core.tools import StructuredTool
 
 # ── _extract_text ────────────────────────────────────────────────────────────
 
@@ -121,6 +124,85 @@ def test_build_agent_returns_fresh_graph_each_call():
     a1 = build_agent("fake/1", model_factory=factory, system_prompt_text="A")
     a2 = build_agent("fake/1", model_factory=factory, system_prompt_text="B")
     assert a1 is not a2
+
+
+def test_get_agent_parts_hides_low_level_place_search_tools():
+    reset_agent_cache()
+    factory = lambda _id: FakeAgentModel(response="x")  # noqa: E731
+    _, tools = _get_agent_parts("fake/1", factory)
+    names = {tool.name for tool in tools}
+    assert "place_discovery" in names
+    assert "discover_booking_flow" in names
+    assert "reserve_table" in names
+    assert "web_search" not in names
+    assert "places_search" not in names
+    assert "place_web_fallback" not in names
+
+
+def test_should_expose_web_search_only_for_explicit_general_web_queries():
+    assert _should_expose_web_search("What are people saying about June Cafe?") is True
+    assert _should_expose_web_search("What are the current hours at June Cafe?") is True
+    assert _should_expose_web_search("Book a table at June Cafe") is False
+    assert _should_expose_web_search("Find me brunch in Dorcol") is False
+
+
+def test_wrap_tool_for_turn_blocks_duplicate_place_discovery_error_retries():
+    calls: list[dict[str, object]] = []
+
+    def _fake_place_discovery(
+        query: str, location: str = "Belgrade", max_results: int = 5
+    ) -> list[dict[str, object]]:
+        calls.append(
+            {"query": query, "location": location, "max_results": max_results}
+        )
+        return [
+            {
+                "name": "",
+                "address": location,
+                "reason": "Places search unavailable.",
+                "review_snippet": None,
+                "website_url": "",
+                "reservation_url": "",
+                "phone": "",
+                "maps_url": "",
+                "source": "error",
+                "status": "error",
+            }
+        ]
+
+    tool = StructuredTool.from_function(
+        func=_fake_place_discovery,
+        name="place_discovery",
+        description="fake",
+    )
+    wrapped = _wrap_tool_for_turn(tool)
+
+    first = wrapped.invoke(
+        {"query": "coffee and light meals Belgrade", "location": "Belgrade", "max_results": 5}
+    )
+    second = wrapped.invoke(
+        {"query": "coffee and light meals Belgrade", "location": "Belgrade", "max_results": 5}
+    )
+
+    assert len(calls) == 1
+    assert first[0]["reason"] == "Places search unavailable."
+    assert "already failed in this turn" in second[0]["reason"]
+
+
+def test_wrap_tool_for_turn_reuses_successful_result_without_recomputing():
+    calls = 0
+
+    def _fake_geocode(location: str) -> str:
+        nonlocal calls
+        calls += 1
+        return f"coords for {location}"
+
+    tool = StructuredTool.from_function(func=_fake_geocode, name="geocode", description="fake")
+    wrapped = _wrap_tool_for_turn(tool)
+
+    assert wrapped.invoke({"location": "Belgrade"}) == "coords for Belgrade"
+    assert wrapped.invoke({"location": "Belgrade"}) == "coords for Belgrade"
+    assert calls == 1
 
 
 # ── _build_output_context (Phase 4 — judge grounding) ───────────────────────

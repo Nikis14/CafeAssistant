@@ -22,7 +22,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from taste_agent.logging_ import get_logger, trace
+from taste_agent.logging_ import debug_enter, debug_exit, get_logger, trace
 
 logger = get_logger(__name__)
 
@@ -89,11 +89,13 @@ def web_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
         query: free-form search query.
         max_results: up to 5 by default; 10 if you need broader coverage.
     """
+    debug_enter("web_search", query=query, max_results=max_results)
     with trace("tool:web_search", query=query[:80], max_results=max_results):
         results = _do_search(query, max_results=max_results)
         if not results:
             results = _sentinel_result(query, "No web search results were returned.")
         logger.info("web_search returned %d result(s) for %r", len(results), query[:60])
+        debug_exit("web_search", result=results)
         return results
 
 

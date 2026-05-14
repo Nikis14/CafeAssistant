@@ -20,7 +20,8 @@ from typing import Any, TypedDict
 
 from pydantic import BaseModel
 
-from taste_agent.logging_ import get_logger, trace
+from taste_agent.config import ALLOW_RUNTIME_MOCKS
+from taste_agent.logging_ import debug_enter, debug_exit, get_logger, trace
 
 logger = get_logger(__name__)
 
@@ -273,6 +274,7 @@ def run(query: str, location: str = "Belgrade", max_results: int = 5) -> list[di
     Returns:
         List of result dicts with keys: name, address, reason, review_snippet.
     """
+    debug_enter("places_search.run", query=query, location=location, max_results=max_results)
     with trace("skill:places_search", query=query, location=location):
         api_key = os.environ.get(_FOURSQUARE_KEY_ENV)
         if api_key:
@@ -287,28 +289,43 @@ def run(query: str, location: str = "Belgrade", max_results: int = 5) -> list[di
                     "places_search via Foursquare returned %d result(s)", len(results)
                 )
                 if results:
+                    debug_exit("places_search.run", result=results)
                     return results
-                return _sentinel_result(
+                result = _sentinel_result(
                     location=location,
                     reason="No matching places were returned by the upstream Places API.",
                 )
+                debug_exit("places_search.run", result=result)
+                return result
             except (urllib.error.URLError, urllib.error.HTTPError, ValueError, KeyError) as e:
                 logger.warning(
                     "Foursquare search failed: %s; returning sentinel result (mock would be Belgrade-only)",
                     e,
                 )
-                return _sentinel_result(
+                result = _sentinel_result(
                     location=location,
                     reason=f"Places search unavailable: upstream Places API failed ({e}).",
                 )
+                debug_exit("places_search.run", result=result)
+                return result
 
-        # Offline / demo path: no key set → Belgrade-only mock data is OK
-        # because there's no expectation of real coverage.
+        if not ALLOW_RUNTIME_MOCKS:
+            result = _sentinel_result(
+                location=location,
+                reason="Places search unavailable: no live Places API configured.",
+            )
+            debug_exit("places_search.run", result=result)
+            return result
+
+        # Offline / demo path: mocks explicitly enabled.
         results = _mock_search(query, location, max_results)
         logger.info("places_search via mock returned %d result(s)", len(results))
         if results:
+            debug_exit("places_search.run", result=results)
             return results
-        return _sentinel_result(
+        result = _sentinel_result(
             location=location,
             reason="No matching places found in the local fallback dataset.",
         )
+        debug_exit("places_search.run", result=result)
+        return result

@@ -51,6 +51,13 @@ def test_dom_snapshot_returns_programmed_dom_for_url():
     assert b.dom_snapshot() == "<form>fixed</form>"
 
 
+def test_raw_html_returns_programmed_dom_for_url():
+    b = MockBrowserBackend()
+    b.set_dom("https://x.example/r", "<html><body><form>fixed</form></body></html>")
+    b.navigate("https://x.example/r")
+    assert b.raw_html() == "<html><body><form>fixed</form></body></html>"
+
+
 def test_expect_dom_one_shot_overrides_then_reverts():
     b = MockBrowserBackend()
     b.set_dom("https://x.example/", "<base>")

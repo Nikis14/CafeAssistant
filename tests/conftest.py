@@ -21,6 +21,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 # sentence-transformers instead. Set at module load so it precedes any
 # ``EpisodicMemory`` construction triggered by test imports.
 os.environ.setdefault("TASTE_AGENT_FAKE_EMBEDDING", "1")
+os.environ.setdefault("TASTE_AGENT_ALLOW_RUNTIME_MOCKS", "1")
 
 # Skip the LLM judge in the output guardrail by default. Tests that want to
 # exercise the judge path inject a deterministic fake JSON-returning model.

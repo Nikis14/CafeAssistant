@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from taste_agent.browser.backend import MockBrowserBackend
-from taste_agent.browser.tools import build_browser_tools, make_request_approval_tool
+from taste_agent.browser.tools import (
+    build_browser_tools,
+    make_request_approval_tool,
+)
 from taste_agent.guardrails.action import get_pending
 
 
@@ -19,7 +22,7 @@ def test_build_browser_tools_returns_five_tools():
         "browser_click",
         "browser_fill",
         "browser_wait_for",
-        "browser_dom_snapshot",
+        "browser_page_context",
     }
 
 
@@ -29,6 +32,19 @@ def test_browser_navigate_tool_drives_backend():
     nav = _by_name(tools, "browser_navigate")
     nav.invoke({"url": "https://x.example/reserve"})
     assert backend.calls == [("navigate", {"url": "https://x.example/reserve"})]
+
+
+def test_browser_navigate_tool_returns_block_message_on_permission_error():
+    class _BlockedBackend(MockBrowserBackend):
+        def navigate(self, url: str) -> None:
+            raise PermissionError("blocked cross-host jump")
+
+    backend = _BlockedBackend()
+    tools = build_browser_tools(backend)
+    nav = _by_name(tools, "browser_navigate")
+    result = nav.invoke({"url": "https://blocked.example/"})
+    assert "blocked navigation" in result
+    assert backend.calls == []
 
 
 def test_browser_click_tool_drives_backend():
@@ -45,13 +61,29 @@ def test_browser_fill_tool_drives_backend():
     assert backend.calls == [("fill", {"selector": "input#name", "value": "Ana"})]
 
 
-def test_browser_dom_snapshot_tool_returns_dom():
+def test_browser_page_context_tool_returns_raw_html():
     backend = MockBrowserBackend()
-    backend.set_dom("https://x.example/r", "<form>booking</form>")
+    html = "<html><body><h1>June Cafe</h1><a href='/booking'>Reserve here</a></body></html>"
+    backend.set_dom(
+        "https://x.example/r",
+        html,
+    )
     backend.navigate("https://x.example/r")
     tools = build_browser_tools(backend)
-    dom = _by_name(tools, "browser_dom_snapshot").invoke({"selector": "body"})
-    assert dom == "<form>booking</form>"
+    payload = _by_name(tools, "browser_page_context").invoke({})
+    assert payload == html
+    assert ("raw_html", {}) in backend.calls
+
+
+def test_browser_wait_for_tool_returns_timeout_message_on_missing_selector():
+    class _TimeoutBackend(MockBrowserBackend):
+        def wait_for(self, selector: str, timeout_ms: int = 5000) -> None:
+            raise TimeoutError("not found")
+
+    backend = _TimeoutBackend()
+    tools = build_browser_tools(backend)
+    result = _by_name(tools, "browser_wait_for").invoke({"selector": "iframe", "timeout_ms": 1234})
+    assert result == "selector iframe did not appear within 1234ms"
 
 
 def test_request_user_approval_tool_registers_pending():

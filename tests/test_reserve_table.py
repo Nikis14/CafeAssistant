@@ -30,6 +30,7 @@ from taste_agent.skills.reserve_table.reserve_table import (
     run,
     set_default_backend,
 )
+import taste_agent.skills.reserve_table.reserve_table as _rt_module
 from tests.fakes import FakeAgentModel
 
 
@@ -85,6 +86,26 @@ def test_replay_cached_registers_pending_approval():
     assert "x.example" in pending.summary
 
 
+def test_replay_cached_allows_raw_html_observation_steps():
+    backend = MockBrowserBackend()
+    result = _replay_cached(
+        cached_trace=[
+            ("navigate", {"url": "https://x.example/r"}),
+            ("raw_html", {}),
+        ],
+        backend=backend,
+        place_name="Iva",
+        reservation_url="https://x.example/r",
+        date="2026-05-20",
+        time="20:00",
+        party_size=2,
+        contact_name="Ana",
+        contact_phone="",
+    )
+    assert result["status"] == "pending_approval"
+    assert ("raw_html", {}) in backend.calls
+
+
 def test_replay_cached_fails_on_unknown_action():
     """Cache containing an unrecognised action must abort, not partial-submit."""
     backend = MockBrowserBackend()
@@ -134,6 +155,22 @@ def test_run_uses_cache_when_available():
     )
     assert result["source"] == "cached"
     assert result["status"] == "pending_approval"
+
+
+def test_run_without_backend_returns_configuration_error(monkeypatch):
+    monkeypatch.setattr(_rt_module, "ALLOW_RUNTIME_MOCKS", False)
+    _rt_module._DEFAULT_BACKEND = None
+    result = run(
+        place_name="June Cafe",
+        reservation_url="https://june-cafe.resos.com/booking",
+        date="2026-05-20",
+        time="20:00",
+        party_size=2,
+        contact_name="Ana",
+    )
+    assert result["status"] == "failed"
+    assert result["source"] == "configuration"
+    assert "Browser automation is not configured" in result["error"]
 
 
 def test_prepare_from_spec_fills_current_values():
@@ -194,6 +231,41 @@ def test_prepare_from_spec_fills_current_values():
     ]
 
 
+def test_prepare_from_spec_allows_raw_html_observation_steps():
+    backend = MockBrowserBackend()
+    spec = BookingFlowSpec(
+        status="ok",
+        place_name="June Cafe",
+        source_host="june-cafe.resos.com",
+        platform="resos",
+        entry_url="https://june-cafe.resos.com/booking",
+        final_form_url="https://june-cafe.resos.com/booking",
+        steps_to_form=[
+            BookingFlowStep(
+                action="navigate",
+                args={"url": "https://june-cafe.resos.com/booking"},
+            ),
+            BookingFlowStep(action="raw_html", args={}),
+        ],
+        required_fields=[
+            BookingFieldSpec(name="contact_name", type="text", selector="input[name='name']"),
+        ],
+    )
+    result = _prepare_from_spec(
+        flow_spec=spec,
+        backend=backend,
+        place_name="June Cafe",
+        reservation_url="https://june-cafe.resos.com/booking",
+        date="2026-05-20",
+        time="20:00",
+        party_size=2,
+        contact_name="Ana",
+        contact_phone="",
+    )
+    assert result["status"] == "pending_approval"
+    assert ("raw_html", {}) in backend.calls
+
+
 def test_run_prefers_spec_cache_over_raw_trace():
     backend = MockBrowserBackend()
     set_default_backend(backend)
@@ -245,6 +317,57 @@ def test_run_prefers_spec_cache_over_raw_trace():
     assert result["source"] == "spec"
     assert ("fill", {"selector": "input[name='name']", "value": "Ana"}) in backend.calls
     assert ("fill", {"selector": "input[name='name']", "value": "OLD"}) not in backend.calls
+
+
+def test_run_impl_ignores_incomplete_cached_spec(monkeypatch):
+    backend = MockBrowserBackend()
+    url = "https://june-cafe.resos.com/booking"
+    save_spec(
+        url,
+        BookingFlowSpec(
+            status="ok",
+            place_name="June Cafe",
+            source_host="june-cafe.resos.com",
+            platform="resos",
+            entry_url=url,
+            final_form_url=url,
+            steps_to_form=[BookingFlowStep(action="navigate", args={"url": url})],
+            required_fields=[
+                BookingFieldSpec(name="contact_name", type="text", selector="input[name='name']"),
+            ],
+        ),
+    )
+
+    def _fake_run_browser_subagent(**_kwargs):
+        action_id = register_pending("confirm_reservation", "Reserve at June Cafe")
+        return {
+            "messages": [],
+            "last_message_text": "done",
+            "actions": [("navigate", {"url": url}), ("fill", {"selector": "input[name='name']", "value": "Ana"})],
+            "action_id": action_id,
+        }
+
+    monkeypatch.setattr(
+        "taste_agent.skills.reserve_table.reserve_table.run_browser_subagent",
+        _fake_run_browser_subagent,
+    )
+
+    result = _run_impl(
+        place_name="June Cafe",
+        reservation_url=url,
+        date="2026-05-20",
+        time="20:00",
+        party_size=2,
+        contact_name="Ana",
+        contact_phone="",
+        backend=backend,
+        model_factory=_factory,
+    )
+
+    assert result["status"] == "pending_approval"
+    assert result["source"] == "agentic"
+    spec = get_spec(url)
+    assert spec is None or spec.status != "ok"
 
 
 def test_run_rejects_homepage_url_before_subagent():

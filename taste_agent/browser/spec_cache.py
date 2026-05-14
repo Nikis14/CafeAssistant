@@ -25,6 +25,10 @@ def get_spec(url: str) -> BookingFlowSpec | None:
     return _CACHE.get(host_of(url))
 
 
+def delete_spec(url: str) -> None:
+    _CACHE.pop(host_of(url), None)
+
+
 def has_spec(url: str) -> bool:
     return host_of(url) in _CACHE
 

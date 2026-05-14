@@ -21,8 +21,9 @@ tavily-python>=0.5.0
 # Vector store for episodic memory (Phase 3)
 chromadb>=1.5.0
 langchain-chroma>=1.1.0
-# Required for langchain-chroma's transitive opentelemetry imports
-opentelemetry-api>=1.40.0
+# Keep this on the 1.39 line: chroma's telemetry stack currently resolves
+# through opentelemetry-semantic-conventions 0.60b1, which conflicts with 1.40+.
+opentelemetry-api>=1.39,<1.40
 # HuggingFace sentence-transformers for production episodic embeddings.
 # Tests bypass via TASTE_AGENT_FAKE_EMBEDDING=1.
 langchain-huggingface>=1.2.0
@@ -30,6 +31,7 @@ sentence-transformers>=3.0.0
 
 # UI
 gradio>=4.40.0
+playwright>=1.52.0
 
 # Utilities
 python-dotenv>=1.0.0

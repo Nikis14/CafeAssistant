@@ -32,6 +32,7 @@ branch can finalize anything.
 from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timedelta
+import json
 import re
 from typing import Any, Literal, TypedDict
 from zoneinfo import ZoneInfo
@@ -43,6 +44,7 @@ from langchain_core.messages import (
     HumanMessage,
     ToolMessage,
 )
+from langchain_core.tools import StructuredTool
 
 from taste_agent.config import DEFAULT_MODEL_ID, DEFAULT_TIMEZONE, SKILLS_DIR
 from taste_agent.guardrails import (
@@ -54,7 +56,7 @@ from taste_agent.guardrails import (
     run_input_guardrails,
     run_output_guardrails,
 )
-from taste_agent.logging_ import get_logger, trace
+from taste_agent.logging_ import debug_enter, debug_exit, debug_print, get_logger, trace
 from taste_agent.memory import get_default_procedural, get_default_semantic
 from taste_agent.memory.derive import maybe_derive_procedural
 from taste_agent.memory.gating import (
@@ -75,8 +77,11 @@ from taste_agent.tools import (
     memory_read,
     memory_search,
     place_discovery,
-    place_web_fallback,
     web_search,
+)
+from taste_agent.tools.place_web_fallback import (
+    reset_current_model_id as reset_web_enrichment_model_id,
+    set_current_model_id as set_web_enrichment_model_id,
 )
 
 logger = get_logger(__name__)
@@ -157,6 +162,93 @@ def _default_model_factory(model_id: str) -> BaseChatModel:
 # of the ReAct loop well-formed for those providers.
 _AGENT_PARTS_CACHE: dict[tuple[str, int], tuple[Any, list[Any]]] = {}
 
+_GENERAL_WEB_QUERY_PATTERNS = (
+    re.compile(r"\breviews?\b", re.I),
+    re.compile(r"\bratings?\b", re.I),
+    re.compile(r"\bhours?\b", re.I),
+    re.compile(r"\bopen(?:ing)?\b", re.I),
+    re.compile(r"\barticles?\b", re.I),
+    re.compile(r"\bblogs?\b", re.I),
+    re.compile(r"\bnews\b", re.I),
+    re.compile(r"\bmenu\b", re.I),
+    re.compile(r"\b(?:what are people saying|what people are saying|people saying)\b", re.I),
+)
+
+
+def _tool_call_cache_key(tool_name: str, kwargs: dict[str, Any]) -> str:
+    return json.dumps(
+        {"tool": tool_name, "kwargs": kwargs},
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def _is_error_like_place_result(result: Any) -> bool:
+    return (
+        isinstance(result, list)
+        and bool(result)
+        and all(
+            isinstance(item, dict)
+            and (item.get("status") == "error" or item.get("source") == "error")
+            for item in result
+        )
+    )
+
+
+def _duplicate_place_discovery_result(location: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "",
+            "address": location,
+            "reason": (
+                "This exact place_discovery query already failed in this turn. "
+                "Do not retry it unchanged; adjust the query or continue without "
+                "claiming grounded results."
+            ),
+            "review_snippet": None,
+            "website_url": "",
+            "reservation_url": "",
+            "phone": "",
+            "maps_url": "",
+            "source": "error",
+            "status": "error",
+        }
+    ]
+
+
+def _wrap_tool_for_turn(tool: Any) -> Any:
+    """Add deterministic per-turn duplicate suppression for tool calls."""
+    if not isinstance(tool, StructuredTool) or tool.func is None:
+        return tool
+
+    cache: dict[str, Any] = {}
+
+    def _wrapped(**kwargs: Any) -> Any:
+        debug_enter(tool.name, kwargs=kwargs)
+        cache_key = _tool_call_cache_key(tool.name, kwargs)
+        if cache_key in cache:
+            previous = cache[cache_key]
+            if tool.name == "place_discovery" and _is_error_like_place_result(previous):
+                result = _duplicate_place_discovery_result(str(kwargs.get("location", "")))
+                debug_exit(tool.name, result=result, cache_hit=True)
+                return result
+            debug_exit(tool.name, result=previous, cache_hit=True)
+            return previous
+        result = tool.func(**kwargs)
+        cache[cache_key] = result
+        debug_exit(tool.name, result=result, cache_hit=False)
+        return result
+
+    return StructuredTool.from_function(
+        func=_wrapped,
+        name=tool.name,
+        description=tool.description,
+        args_schema=tool.args_schema,
+        infer_schema=False,
+        response_format=getattr(tool, "response_format", "content"),
+    )
+
 
 def _get_agent_parts(
     model_id: str, factory: ModelFactory
@@ -169,14 +261,12 @@ def _get_agent_parts(
     cache_key = (model_id, id(factory))
     if cache_key not in _AGENT_PARTS_CACHE:
         logger.info("building agent parts for model=%s", model_id)
-        skills = load_all_skills(SKILLS_DIR)
+        skills = [skill for skill in load_all_skills(SKILLS_DIR) if skill.name != "places_search"]
         tools = [
             discover_booking_flow,
             geocode,
             memory_read,
             memory_search,
-            web_search,
-            place_web_fallback,
             place_discovery,
             *skills,
         ]
@@ -190,6 +280,7 @@ def build_agent(
     model_factory: ModelFactory | None = None,
     *,
     system_prompt_text: str | None = None,
+    include_web_search: bool = False,
 ) -> Any:
     """Build a ReAct agent. Cheap to call repeatedly (only the graph compile
     runs per call; LLM + tools are cached).
@@ -203,7 +294,10 @@ def build_agent(
     from langchain.agents import create_agent
 
     factory = model_factory or _default_model_factory
-    llm, tools = _get_agent_parts(model_id, factory)
+    llm, base_tools = _get_agent_parts(model_id, factory)
+    tools = [_wrap_tool_for_turn(tool) for tool in base_tools]
+    if include_web_search:
+        tools.append(_wrap_tool_for_turn(web_search))
     if system_prompt_text is not None:
         return create_agent(llm, tools, system_prompt=system_prompt_text)
     return create_agent(llm, tools)
@@ -448,6 +542,11 @@ def _extract_known_booking_values(
     return known
 
 
+def _should_expose_web_search(user_text: str) -> bool:
+    """Expose generic web search only for explicit web-evidence requests."""
+    return any(pattern.search(user_text) for pattern in _GENERAL_WEB_QUERY_PATTERNS)
+
+
 # ── State graph ──────────────────────────────────────────────────────────────
 
 
@@ -503,6 +602,7 @@ def input_guardrail_node(state: OrchestratorState) -> dict[str, Any]:
     Refusal short-circuits to END by writing response_text + debug; the
     routing function picks up that signal.
     """
+    debug_print("input_guardrail_node")
     with trace("node:input_guardrail"):
         guard = run_input_guardrails(state["user_text"])
         if guard.refusal_message is not None:
@@ -527,6 +627,7 @@ def approval_check_node(state: OrchestratorState) -> dict[str, Any]:
     Runs on the *cleaned* text (post input guardrail) so an injection payload
     can't sneak through alongside an approve keyword.
     """
+    debug_print("approval_check_node")
     with trace("node:approval_check"):
         pending = get_pending()
         pending_before_id = pending.action_id if pending else None
@@ -547,6 +648,7 @@ def approval_check_node(state: OrchestratorState) -> dict[str, Any]:
 
 def finalize_node(state: OrchestratorState) -> dict[str, Any]:
     """Approve + finalize a pending reservation. Terminal."""
+    debug_print("finalize_node")
     aid = state["pending_action_id"]
     with trace("node:finalize", action_id=aid):
         if not approve(aid):
@@ -574,6 +676,7 @@ def finalize_node(state: OrchestratorState) -> dict[str, Any]:
 
 def cancel_node(state: OrchestratorState) -> dict[str, Any]:
     """Discard a pending reservation. Terminal."""
+    debug_print("cancel_node")
     aid = state["pending_action_id"]
     with trace("node:cancel", action_id=aid):
         cancel_reservation(aid)
@@ -595,27 +698,35 @@ def agent_node(state: OrchestratorState) -> dict[str, Any]:
     loop produces well-formed message ordering for strict providers like
     Mistral. Messages we pass are just ``[*history, current_user_message]``.
     """
+    debug_print("agent_node")
     facts = get_default_semantic().as_dict()
     patterns_text = get_default_procedural().as_text()
     booking_values = _extract_known_booking_values(state["history"])
+    include_web_search = _should_expose_web_search(state["cleaned_text"])
     sys_prompt_text = system_prompt(
         facts=facts,
         patterns_text=patterns_text,
         booking_values=booking_values,
+        include_web_search=include_web_search,
     )
 
     agent = build_agent(
         state["model_id"],
         model_factory=state.get("model_factory"),
         system_prompt_text=sys_prompt_text,
+        include_web_search=include_web_search,
     )
 
     messages: list[BaseMessage] = [
         *state["history"],
         HumanMessage(content=state["cleaned_text"]),
     ]
-    with trace("node:agent", n_messages=len(messages)):
-        result = agent.invoke({"messages": messages})
+    token = set_web_enrichment_model_id(state["model_id"])
+    try:
+        with trace("node:agent", n_messages=len(messages)):
+            result = agent.invoke({"messages": messages})
+    finally:
+        reset_web_enrichment_model_id(token)
 
     all_msgs: list[BaseMessage] = result["messages"]
 
@@ -634,6 +745,7 @@ def agent_node(state: OrchestratorState) -> dict[str, Any]:
 
 def output_guardrail_node(state: OrchestratorState) -> dict[str, Any]:
     """Run PII redaction + (env-controlled) LLM judge on the agent's reply."""
+    debug_enter("output_guardrail_node", response_text=state["response_text"])
     with trace("node:output_guardrail"):
         out_factory = state.get("model_factory") or _default_model_factory
         out_guard = run_output_guardrails(
@@ -644,15 +756,18 @@ def output_guardrail_node(state: OrchestratorState) -> dict[str, Any]:
             model_factory=out_factory,
             skip_judge=state.get("skip_output_judge"),
         )
-        return {
+        result = {
             "out_guard": out_guard,
             "response_text": out_guard.response_text,
         }
+        debug_exit("output_guardrail_node", result=result)
+        return result
 
 
 def memory_gate_node(state: OrchestratorState) -> dict[str, Any]:
     """Analyze a short recent dialogue window and decide whether reflection
     should run on this turn."""
+    debug_enter("memory_gate_node")
     with trace("node:memory_gate"):
         clean_response = state["out_guard"].response_text
         decision = analyze_memory_relevance(
@@ -660,21 +775,26 @@ def memory_gate_node(state: OrchestratorState) -> dict[str, Any]:
             state["cleaned_text"],
             clean_response,
         )
-        return {
+        result = {
             "memory_gate": decision,
             "memory_window_text": render_window_for_reflection(
                 decision.window_messages
             ),
         }
+        debug_exit("memory_gate_node", result=result)
+        return result
 
 
 def reflection_node(state: OrchestratorState) -> dict[str, Any]:
     """Run the reflection sub-agent (env-controlled). Updates semantic +
     episodic memory automatically based on what the user said this turn."""
+    debug_enter("reflection_node")
     with trace("node:reflection"):
         decision = state.get("memory_gate")
         if decision is not None and not decision.should_reflect:
-            return {"reflection_result": ReflectionResult(skipped=True)}
+            result = {"reflection_result": ReflectionResult(skipped=True)}
+            debug_exit("reflection_node", result=result)
+            return result
 
         out_factory = state.get("model_factory") or _default_model_factory
         # Use the PII-stripped response WITHOUT the guardrail note — the note
@@ -693,12 +813,15 @@ def reflection_node(state: OrchestratorState) -> dict[str, Any]:
             model_id=state["model_id"],
             skip=state.get("skip_reflection"),
         )
-        return {"reflection_result": collector}
+        result = {"reflection_result": collector}
+        debug_exit("reflection_node", result=result)
+        return result
 
 
 def procedural_derive_node(state: OrchestratorState) -> dict[str, Any]:
     """Conditionally derive procedural patterns — only when enough new
     episodes accumulated since the last derivation (default: 5)."""
+    debug_enter("procedural_derive_node")
     with trace("node:procedural_derive"):
         out_factory = state.get("model_factory") or _default_model_factory
         ran = maybe_derive_procedural(
@@ -707,13 +830,16 @@ def procedural_derive_node(state: OrchestratorState) -> dict[str, Any]:
         )
         if ran:
             logger.info("procedural patterns derived this turn")
-        return {"procedural_derived": ran}
+        result = {"procedural_derived": ran}
+        debug_exit("procedural_derive_node", result=result)
+        return result
 
 
 def format_agent_response_node(state: OrchestratorState) -> dict[str, Any]:
     """Build the final debug dict and (if a new pending was registered during
     this turn) append a yes/no confirmation CTA so the next turn's intent
     detector reliably catches the user's reply."""
+    debug_enter("format_agent_response_node")
     with trace("node:format_agent_response"):
         guard = state["guard_result"]
         out_guard = state["out_guard"]
@@ -804,7 +930,9 @@ def format_agent_response_node(state: OrchestratorState) -> dict[str, Any]:
             if dropped:
                 debug["clarifications_dropped"] = dropped
 
-        return {"response_text": response_text, "debug": debug}
+        result = {"response_text": response_text, "debug": debug}
+        debug_exit("format_agent_response_node", result=result)
+        return result
 
 
 # ── Routing ──────────────────────────────────────────────────────────────────
@@ -915,6 +1043,7 @@ def run_turn(
         ``(response_text, debug_info)``. Shape unchanged from prior versions
         so callers don't need to update.
     """
+    debug_print("run_turn")
     initial_state: OrchestratorState = {
         "user_text": user_text,
         "history": history or [],

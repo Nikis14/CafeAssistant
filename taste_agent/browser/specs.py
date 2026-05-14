@@ -34,7 +34,10 @@ class BookingFieldSpec(BaseModel):
 class BookingFlowSpec(BaseModel):
     """A discovered booking flow, normalized for reuse across runs."""
 
-    status: str = Field(..., description="Discovery status, e.g. ok or no_online_booking.")
+    status: str = Field(
+        ...,
+        description="Discovery status, e.g. ok, partial_booking_flow, or no_online_booking.",
+    )
     place_name: str = Field(..., description="Human-readable place name.")
     source_host: str = Field(..., description="Host this flow was learned from.")
     platform: str = Field(default="unknown", description="Booking platform or host family.")

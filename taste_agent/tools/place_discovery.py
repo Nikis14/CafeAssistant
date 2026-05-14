@@ -1,7 +1,7 @@
 """Parallel place discovery: structured places + web enrichment merged.
 
 This tool is the default discovery path for venue recommendations. It runs the
-structured places API search and the web fallback in parallel, then merges the
+structured places API search and the web enrichment path in parallel, then merges the
 results into one normalized candidate list.
 """
 
@@ -13,9 +13,9 @@ from typing import Any, TypedDict
 
 from langchain_core.tools import tool
 
-from taste_agent.logging_ import get_logger, trace
+from taste_agent.logging_ import debug_enter, debug_exit, get_logger, trace
 from taste_agent.skills.places_search.places_search import run as places_search_run
-from taste_agent.tools.place_web_fallback import place_web_fallback
+from taste_agent.tools.place_web_fallback import place_web_enrichment
 
 logger = get_logger(__name__)
 
@@ -41,7 +41,7 @@ def _places_node(state: _DiscoveryState) -> dict[str, Any]:
 
 def _web_node(state: _DiscoveryState) -> dict[str, Any]:
     with trace("tool:place_discovery:web", query=state["query"][:80]):
-        results = place_web_fallback.invoke(
+        results = place_web_enrichment.invoke(
             {
                 "query": state["query"],
                 "location": state["location"],
@@ -68,6 +68,39 @@ def _merge_reason(places_reason: str, web_reason: str) -> str:
     return places_reason or web_reason
 
 
+def _summarize_error_results(
+    places_results: list[dict[str, Any]],
+    web_results: list[dict[str, Any]],
+    *,
+    location: str,
+) -> list[dict[str, Any]]:
+    places_reason = ""
+    web_reason = ""
+    if places_results and _is_error_result(places_results[0]):
+        places_reason = str(places_results[0].get("reason", "")).strip()
+    if web_results and _is_error_result(web_results[0]):
+        web_reason = str(web_results[0].get("reason", "")).strip()
+
+    reason = _merge_reason(places_reason, web_reason)
+    if not reason:
+        reason = "Place discovery returned no usable results."
+
+    return [
+        {
+            "name": "",
+            "address": location,
+            "reason": reason,
+            "review_snippet": None,
+            "website_url": "",
+            "reservation_url": "",
+            "phone": "",
+            "maps_url": "",
+            "source": "error",
+            "status": "error",
+        }
+    ]
+
+
 def _merge_results(
     places_results: list[dict[str, Any]],
     web_results: list[dict[str, Any]],
@@ -78,20 +111,16 @@ def _merge_results(
     web_ok = [r for r in web_results if not _is_error_result(r) and r.get("name")]
 
     if not places_ok and not web_ok:
-        return places_results[:1] or web_results[:1] or [
-            {
-                "name": "",
-                "address": "",
-                "reason": "Place discovery returned no usable results.",
-                "review_snippet": None,
-                "website_url": "",
-                "reservation_url": "",
-                "phone": "",
-                "maps_url": "",
-                "source": "error",
-                "status": "error",
-            }
-        ]
+        fallback_location = ""
+        if places_results:
+            fallback_location = str(places_results[0].get("address", "")).strip()
+        if not fallback_location and web_results:
+            fallback_location = str(web_results[0].get("address", "")).strip()
+        return _summarize_error_results(
+            places_results,
+            web_results,
+            location=fallback_location,
+        )
 
     web_by_name = {_normalize_name(r["name"]): r for r in web_ok}
     merged: list[dict[str, Any]] = []
@@ -181,6 +210,7 @@ def place_discovery(
     Use this as the default venue-discovery tool when the user wants
     recommendations. It returns one merged normalized candidate list.
     """
+    debug_enter("place_discovery", query=query, location=location, max_results=max_results)
     initial_state: _DiscoveryState = {
         "query": query,
         "location": location,
@@ -195,4 +225,5 @@ def place_discovery(
         query[:60],
         location,
     )
+    debug_exit("place_discovery", result=results)
     return results

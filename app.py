@@ -20,6 +20,7 @@ import gradio as gr  # noqa: E402
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage  # noqa: E402
 
 from taste_agent.config import DEFAULT_MODEL_ID, MODEL_REGISTRY  # noqa: E402
+from taste_agent.browser.backend import PlaywrightBrowserBackend  # noqa: E402
 from taste_agent.logging_ import configure_logging, get_logger  # noqa: E402
 from taste_agent.memory import (  # noqa: E402
     get_default_episodic,
@@ -29,9 +30,16 @@ from taste_agent.memory import (  # noqa: E402
     set_session_id,
 )
 from taste_agent.orchestrator import run_turn  # noqa: E402
+from taste_agent.skills.reserve_table.reserve_table import set_default_backend  # noqa: E402
 
 configure_logging()
 logger = get_logger(__name__)
+
+try:
+    set_default_backend(PlaywrightBrowserBackend())
+    logger.info("configured Playwright browser backend")
+except Exception as e:
+    logger.warning("browser backend not configured: %s", e)
 
 _LABEL_TO_ID: dict[str, str] = {m.label: m.litellm_id for m in MODEL_REGISTRY}
 _MODEL_LABELS: list[str] = [m.label for m in MODEL_REGISTRY]
