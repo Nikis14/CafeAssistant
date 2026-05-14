@@ -6,9 +6,11 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from taste_agent.orchestrator import (
     _build_output_context,
+    _chat_model_kwargs,
     _count_tool_calls,
     _extract_text,
     _format_output_note,
+    _get_agent_parts,
     build_agent,
     reset_agent_cache,
 )
@@ -79,31 +81,42 @@ def test_count_tool_calls_sums_across_messages():
 # ── build_agent caching ──────────────────────────────────────────────────────
 
 
-def test_build_agent_caches_same_factory():
+def test_get_agent_parts_caches_same_factory():
+    """LLM + tools are cached per (model_id, factory). Graph itself is
+    rebuilt per build_agent call so the system_prompt stays fresh."""
     reset_agent_cache()
     factory = lambda _id: FakeAgentModel(response="x")  # noqa: E731
-    a1 = build_agent("fake/1", model_factory=factory)
-    a2 = build_agent("fake/1", model_factory=factory)
-    assert a1 is a2
+    llm1, tools1 = _get_agent_parts("fake/1", factory)
+    llm2, tools2 = _get_agent_parts("fake/1", factory)
+    assert llm1 is llm2
+    assert tools1 is tools2
 
 
-def test_build_agent_rebuilds_for_different_factory():
-    # Two distinct factory objects should yield distinct agents even for the
-    # same model id — the cache key includes factory identity.
+def test_get_agent_parts_rebuilds_for_different_factory():
     reset_agent_cache()
     f1 = lambda _id: FakeAgentModel(response="x")  # noqa: E731
     f2 = lambda _id: FakeAgentModel(response="y")  # noqa: E731
-    a1 = build_agent("fake/1", model_factory=f1)
-    a2 = build_agent("fake/1", model_factory=f2)
-    assert a1 is not a2
+    llm1, _ = _get_agent_parts("fake/1", f1)
+    llm2, _ = _get_agent_parts("fake/1", f2)
+    assert llm1 is not llm2
 
 
 def test_reset_agent_cache_clears_entries():
     reset_agent_cache()
     factory = lambda _id: FakeAgentModel(response="x")  # noqa: E731
-    a1 = build_agent("fake/1", model_factory=factory)
+    llm1, _ = _get_agent_parts("fake/1", factory)
     reset_agent_cache()
-    a2 = build_agent("fake/1", model_factory=factory)
+    llm2, _ = _get_agent_parts("fake/1", factory)
+    assert llm1 is not llm2
+
+
+def test_build_agent_returns_fresh_graph_each_call():
+    """The graph is rebuilt per call so a changed system_prompt takes effect
+    immediately — even though the LLM + tools are reused."""
+    reset_agent_cache()
+    factory = lambda _id: FakeAgentModel(response="x")  # noqa: E731
+    a1 = build_agent("fake/1", model_factory=factory, system_prompt_text="A")
+    a2 = build_agent("fake/1", model_factory=factory, system_prompt_text="B")
     assert a1 is not a2
 
 
@@ -197,6 +210,12 @@ def test_format_note_empty_when_no_concerns():
     assert _format_output_note(OutputGuardrailResult(response_text="ok")) == ""
 
 
+def test_chat_model_kwargs_omit_temperature_for_gpt5():
+    assert _chat_model_kwargs("openai/gpt-5") == {}
+    assert _chat_model_kwargs("openai/gpt-5-mini") == {}
+    assert _chat_model_kwargs("mistral/mistral-small-latest") == {"temperature": 0.2}
+
+
 def test_format_note_suppresses_factuality_when_ok_flag_true():
     """Advisory concerns without a fail flag should not be loudly surfaced."""
     from taste_agent.guardrails.output import OutputGuardrailResult
@@ -270,3 +289,95 @@ def test_clarifications_capped_at_two_per_turn():
     assert "Q3" not in out["response_text"]
     assert "Q4" not in out["response_text"]
     assert out["debug"]["clarifications_dropped"] == 2
+
+
+def test_output_guardrail_node_does_not_append_user_visible_note():
+    from taste_agent.guardrails.output import OutputGuardrailResult
+    from taste_agent.orchestrator import output_guardrail_node
+
+    state = {
+        "response_text": "Try Iva. Call +381 64 123 4567.",
+        "agent_messages": [],
+        "facts": {},
+        "skip_output_judge": True,
+        "model_factory": None,
+    }
+    out = output_guardrail_node(state)
+    assert isinstance(out["out_guard"], OutputGuardrailResult)
+    assert "_Output guardrail:_" not in out["response_text"]
+
+
+def test_memory_gate_skips_reflection_for_transactional_reply(monkeypatch):
+    from taste_agent.memory.gating import MemoryGateDecision
+    from taste_agent.orchestrator import reflection_node
+
+    called = False
+
+    def fail_run_reflection(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("run_reflection should not be called")
+
+    monkeypatch.setattr("taste_agent.orchestrator.run_reflection", fail_run_reflection)
+
+    state = {
+        "memory_gate": MemoryGateDecision(
+            should_reflect=False,
+            allow_clarification=False,
+            semantic_candidate=False,
+            episodic_candidate=False,
+            transactional_only=True,
+            task_clarification_only=True,
+            reason="transactional_only_turn",
+            window_messages=[],
+        ),
+        "out_guard": type("Out", (), {"response_text": "ok"})(),
+        "cleaned_text": "book it for tomorrow",
+        "model_id": "mistral/mistral-small-latest",
+        "skip_reflection": False,
+    }
+
+    out = reflection_node(state)
+
+    assert called is False
+    assert out["reflection_result"].skipped is True
+
+
+def test_reflection_node_passes_window_and_gate_controls(monkeypatch):
+    from taste_agent.memory.gating import MemoryGateDecision
+    from taste_agent.memory.reflection import ReflectionResult
+    from taste_agent.orchestrator import reflection_node
+
+    seen: dict[str, object] = {}
+
+    def fake_run_reflection(**kwargs):
+        seen.update(kwargs)
+        return ReflectionResult()
+
+    monkeypatch.setattr("taste_agent.orchestrator.run_reflection", fake_run_reflection)
+
+    decision = MemoryGateDecision(
+        should_reflect=True,
+        allow_clarification=False,
+        semantic_candidate=True,
+        episodic_candidate=False,
+        transactional_only=False,
+        task_clarification_only=False,
+        reason="reply_to_memory_clarification",
+        window_messages=[],
+    )
+    state = {
+        "memory_gate": decision,
+        "memory_window_text": "User: I usually prefer quiet places.\nAssistant: Noted.",
+        "out_guard": type("Out", (), {"response_text": "Noted."})(),
+        "cleaned_text": "yes please",
+        "model_id": "mistral/mistral-small-latest",
+        "skip_reflection": False,
+        "model_factory": lambda _id: FakeAgentModel(response="unused"),
+    }
+
+    reflection_node(state)
+
+    assert seen["conversation_window"] == state["memory_window_text"]
+    assert seen["gate_reason"] == "reply_to_memory_clarification"
+    assert seen["allow_clarification"] is False

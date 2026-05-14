@@ -19,6 +19,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from taste_agent.browser.backend import BrowserBackend
+from taste_agent.config import DEFAULT_MODEL_ID
 from taste_agent.browser.tools import build_browser_tools, make_request_approval_tool
 from taste_agent.logging_ import get_logger, trace
 from taste_agent.prompts import subagent_prompt
@@ -30,7 +31,7 @@ def run_browser_subagent(
     goal: str,
     backend: BrowserBackend,
     model_factory: Callable[[str], BaseChatModel],
-    model_id: str = "default",
+    model_id: str = DEFAULT_MODEL_ID,
 ) -> dict[str, Any]:
     """Run a ReAct sub-agent against ``backend`` to achieve ``goal``.
 

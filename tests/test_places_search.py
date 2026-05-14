@@ -38,10 +38,27 @@ def test_max_results_respected():
 def test_result_shape_matches_contract():
     results = places_search_run("quiet cafe with wifi", "Belgrade", 3)
     for r in results:
-        assert {"name", "address", "reason", "review_snippet"} <= set(r.keys())
+        assert {
+            "name",
+            "address",
+            "reason",
+            "review_snippet",
+            "website_url",
+            "reservation_url",
+            "phone",
+            "maps_url",
+            "source",
+            "status",
+        } <= set(r.keys())
         assert isinstance(r["name"], str)
         assert isinstance(r["address"], str)
         assert isinstance(r["reason"], str)
+        assert isinstance(r["website_url"], str)
+        assert isinstance(r["reservation_url"], str)
+        assert isinstance(r["phone"], str)
+        assert isinstance(r["maps_url"], str)
+        assert r["source"] in {"mock", "foursquare", "error"}
+        assert r["status"] in {"ok", "error"}
 
 
 def test_vegetarian_query_finds_vegetarian_tag():
@@ -93,6 +110,9 @@ def test_foursquare_path_is_used_when_key_is_set(monkeypatch):
                             "locality": "Belgrade",
                             "country": "RS",
                         },
+                        "website": "https://test.example",
+                        "tel": "+38111111111",
+                        "link": "https://maps.example/test-cafe",
                         "categories": [{"name": "Coffee Shop"}],
                     }
                 ]
@@ -108,9 +128,14 @@ def test_foursquare_path_is_used_when_key_is_set(monkeypatch):
     assert results[0]["name"] == "Test Cafe"
     assert "Knez Mihailova 1" in results[0]["address"]
     assert "Coffee Shop" in results[0]["reason"]
+    assert results[0]["website_url"] == "https://test.example"
+    assert results[0]["phone"] == "+38111111111"
+    assert results[0]["maps_url"] == "https://maps.example/test-cafe"
+    assert results[0]["source"] == "foursquare"
+    assert results[0]["status"] == "ok"
 
 
-def test_foursquare_url_error_returns_empty_not_mock(monkeypatch):
+def test_foursquare_url_error_returns_sentinel_not_mock(monkeypatch):
     """When the API key is set, a Foursquare failure must NOT silently fall
     back to Belgrade mock data — the mock is Belgrade-only and would surface
     fabricated results for non-Belgrade queries."""
@@ -123,14 +148,17 @@ def test_foursquare_url_error_returns_empty_not_mock(monkeypatch):
 
     monkeypatch.setattr(_ps_module.urllib.request, "urlopen", boom)
 
-    # Query in Istanbul — Belgrade mock would be misleading
     results = places_search_run("cappuccino", "Istanbul", 5)
-    assert results == []
+    assert len(results) == 1
+    assert results[0]["address"] == "Istanbul"
+    assert "upstream Places API failed" in results[0]["reason"]
+    assert results[0]["source"] == "error"
+    assert results[0]["status"] == "error"
 
 
-def test_foursquare_http_error_returns_empty_not_mock(monkeypatch):
-    """HTTPError (e.g. 500 from Foursquare) must also fall through to empty,
-    not to Belgrade mock data."""
+def test_foursquare_http_error_returns_sentinel_not_mock(monkeypatch):
+    """HTTPError (e.g. 500 from Foursquare) must also fall through to a
+    sentinel result, not to Belgrade mock data."""
     import urllib.error
 
     monkeypatch.setenv(_FOURSQUARE_KEY_ENV, "fake-key")
@@ -143,7 +171,11 @@ def test_foursquare_http_error_returns_empty_not_mock(monkeypatch):
     monkeypatch.setattr(_ps_module.urllib.request, "urlopen", http_500)
 
     results = places_search_run("ramen", "Tokyo", 5)
-    assert results == []
+    assert len(results) == 1
+    assert results[0]["address"] == "Tokyo"
+    assert "upstream Places API failed" in results[0]["reason"]
+    assert results[0]["source"] == "error"
+    assert results[0]["status"] == "error"
 
 
 def test_no_api_key_uses_mock(monkeypatch):
@@ -151,3 +183,4 @@ def test_no_api_key_uses_mock(monkeypatch):
     results = places_search_run("cappuccino", "Belgrade", 5)
     names = {r["name"] for r in results}
     assert "Koffein" in names  # mock fixture
+    assert all(r["source"] == "mock" for r in results)

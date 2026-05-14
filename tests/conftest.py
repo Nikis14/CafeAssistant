@@ -101,6 +101,22 @@ def _reset_phase2_state():
 
 
 @pytest.fixture(autouse=True)
+def _clear_env_pollution_from_dotenv():
+    """``app.py`` calls ``load_dotenv()`` when imported. ``test_app.py``
+    imports ``app``, which then leaks any keys from the developer's local
+    ``.env`` into the rest of the test session — places_search tests that
+    assume ``FOURSQUARE_API_KEY`` is unset (so the mock path runs) start
+    hitting Foursquare with a fake key and failing.
+
+    Pop the leaky keys before each test. Tests that need them set use
+    ``monkeypatch.setenv`` themselves.
+    """
+    for var in ("FOURSQUARE_API_KEY", "TAVILY_API_KEY"):
+        os.environ.pop(var, None)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_phase3_memory():
     """Reset semantic + episodic + procedural memory defaults across all sessions."""
     from taste_agent.memory import (

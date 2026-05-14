@@ -1,6 +1,7 @@
 from taste_agent.browser.backend import BrowserBackend, MockBrowserBackend
 from taste_agent.browser.parser_cache import (
     clear_cache,
+    format_trace,
     get_trace,
     has_trace,
     host_of,
@@ -14,6 +15,7 @@ __all__ = [
     "MockBrowserBackend",
     "build_browser_tools",
     "clear_cache",
+    "format_trace",
     "get_trace",
     "has_trace",
     "host_of",

@@ -14,6 +14,16 @@ from taste_agent.memory import get_default_episodic
 logger = get_logger(__name__)
 
 
+def _sentinel_event(query: str) -> list[dict[str, object]]:
+    return [
+        {
+            "status": "no_results",
+            "query": query,
+            "notes": "No matching episodic memory entries were found.",
+        }
+    ]
+
+
 @tool
 def memory_search(query: str, k: int = 5) -> list[dict[str, object]]:
     """Search the user's logged dining experiences by similarity to ``query``.
@@ -29,4 +39,6 @@ def memory_search(query: str, k: int = 5) -> list[dict[str, object]]:
     with trace("tool:memory_search", query=query[:60], k=k):
         events = get_default_episodic().search(query, k=k)
         logger.debug("memory_search returned %d event(s)", len(events))
+        if not events:
+            return _sentinel_event(query)
         return [e.model_dump(exclude_none=True) for e in events]

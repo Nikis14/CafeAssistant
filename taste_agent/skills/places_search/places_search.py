@@ -35,6 +35,10 @@ class PlaceFixture(TypedDict):
     address: str
     tags: list[str]
     review: str
+    website_url: str
+    reservation_url: str
+    phone: str
+    maps_url: str
 
 
 class PlaceResult(BaseModel):
@@ -42,6 +46,25 @@ class PlaceResult(BaseModel):
     address: str
     reason: str
     review_snippet: str | None = None
+    website_url: str = ""
+    reservation_url: str = ""
+    phone: str = ""
+    maps_url: str = ""
+    source: str = "unknown"
+    status: str = "ok"
+
+
+def _sentinel_result(*, location: str, reason: str) -> list[dict[str, object]]:
+    return [
+        PlaceResult(
+            name="",
+            address=location,
+            reason=reason,
+            review_snippet=None,
+            source="error",
+            status="error",
+        ).model_dump()
+    ]
 
 
 # Static fixtures (Phase 1). Used as the fallback when no Foursquare key is set
@@ -52,36 +75,60 @@ _MOCK_DATA: list[PlaceFixture] = [
         "address": "Cara Lazara 12, Belgrade",
         "tags": ["coffee", "cafe", "café", "specialty", "quiet", "wifi"],
         "review": "Best flat white in Belgrade. Calm during weekdays, busy on weekends.",
+        "website_url": "",
+        "reservation_url": "",
+        "phone": "",
+        "maps_url": "",
     },
     {
         "name": "Koffein",
         "address": "Resavska 22, Belgrade",
         "tags": ["coffee", "cafe", "cappuccino", "specialty", "roastery"],
         "review": "Serious cappuccino program, beans roasted in-house.",
+        "website_url": "",
+        "reservation_url": "",
+        "phone": "",
+        "maps_url": "",
     },
     {
         "name": "Iva New Balkan Cuisine",
         "address": "Dobračina 56, Belgrade",
         "tags": ["restaurant", "fine-dining", "balkan", "tasting-menu", "vegetarian", "quiet"],
         "review": "Tasting menu, intimate space, strong vegetarian options.",
+        "website_url": "",
+        "reservation_url": "",
+        "phone": "",
+        "maps_url": "",
     },
     {
         "name": "Ambar",
         "address": "Karađorđeva 2-4, Belgrade",
         "tags": ["restaurant", "balkan", "small-plates", "view", "danube"],
         "review": "Modern Balkan small plates with a Danube view.",
+        "website_url": "",
+        "reservation_url": "",
+        "phone": "",
+        "maps_url": "",
     },
     {
         "name": "Salon 1905",
         "address": "Kralja Petra 19, Belgrade",
         "tags": ["restaurant", "fine-dining", "european", "wine"],
         "review": "Refined European menu, deep wine list.",
+        "website_url": "",
+        "reservation_url": "",
+        "phone": "",
+        "maps_url": "",
     },
     {
         "name": "Pržionica D59B",
         "address": "Dobračina 59B, Belgrade",
         "tags": ["coffee", "cafe", "specialty", "roastery", "third-wave"],
         "review": "Third-wave roaster; pour-overs are the move.",
+        "website_url": "",
+        "reservation_url": "",
+        "phone": "",
+        "maps_url": "",
     },
 ]
 
@@ -97,6 +144,14 @@ def _format_foursquare_address(loc: dict[str, Any]) -> str:
         loc.get("country"),
     ]
     return ", ".join(p for p in parts if isinstance(p, str) and p)
+
+
+def _string_field(raw: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
 
 
 def _foursquare_search(
@@ -128,6 +183,10 @@ def _foursquare_search(
             continue
         name = str(r.get("name", ""))
         address = _format_foursquare_address(r.get("location", {}) or {})
+        website_url = _string_field(r, "website", "website_url")
+        phone = _string_field(r, "tel", "phone")
+        maps_url = _string_field(r, "link", "maps_url")
+        reservation_url = _string_field(r, "reservation_url", "booking_url")
         # Phase 4 ships without per-place reviews from Foursquare (would need a
         # second API call per result). Surfacing the categories as a reason
         # keeps the result structure populated.
@@ -144,6 +203,12 @@ def _foursquare_search(
                 address=address,
                 reason=reason,
                 review_snippet=None,
+                website_url=website_url,
+                reservation_url=reservation_url,
+                phone=phone,
+                maps_url=maps_url,
+                source="foursquare",
+                status="ok",
             ).model_dump()
         )
     return formatted
@@ -178,6 +243,12 @@ def _mock_search(
                 address=place["address"],
                 reason=reason,
                 review_snippet=place["review"],
+                website_url=place["website_url"],
+                reservation_url=place["reservation_url"],
+                phone=place["phone"],
+                maps_url=place["maps_url"],
+                source="mock",
+                status="ok",
             ).model_dump()
         )
         logger.debug("candidate score=%d name=%s", score, place["name"])
@@ -206,25 +277,38 @@ def run(query: str, location: str = "Belgrade", max_results: int = 5) -> list[di
         api_key = os.environ.get(_FOURSQUARE_KEY_ENV)
         if api_key:
             # Production path: real Foursquare. If the API call fails, return
-            # an empty list rather than the Belgrade mock — the mock data is
-            # Belgrade-only, so quietly substituting it for a query about
-            # Istanbul (or any other city) would surface fabricated results.
-            # Explicit empty result is the honest signal.
+            # a non-empty sentinel result rather than the Belgrade mock — the
+            # mock data is Belgrade-only, so quietly substituting it for a
+            # query about Istanbul (or any other city) would surface fabricated
+            # results.
             try:
                 results = _foursquare_search(query, location, max_results, api_key)
                 logger.info(
                     "places_search via Foursquare returned %d result(s)", len(results)
                 )
-                return results
+                if results:
+                    return results
+                return _sentinel_result(
+                    location=location,
+                    reason="No matching places were returned by the upstream Places API.",
+                )
             except (urllib.error.URLError, urllib.error.HTTPError, ValueError, KeyError) as e:
                 logger.warning(
-                    "Foursquare search failed: %s; returning empty (mock would be Belgrade-only)",
+                    "Foursquare search failed: %s; returning sentinel result (mock would be Belgrade-only)",
                     e,
                 )
-                return []
+                return _sentinel_result(
+                    location=location,
+                    reason=f"Places search unavailable: upstream Places API failed ({e}).",
+                )
 
         # Offline / demo path: no key set → Belgrade-only mock data is OK
         # because there's no expectation of real coverage.
         results = _mock_search(query, location, max_results)
         logger.info("places_search via mock returned %d result(s)", len(results))
-        return results
+        if results:
+            return results
+        return _sentinel_result(
+            location=location,
+            reason="No matching places found in the local fallback dataset.",
+        )

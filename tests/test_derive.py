@@ -244,3 +244,25 @@ def test_maybe_derive_success_with_empty_patterns_advances_and_clears():
     assert proc.count() == 0
     # Threshold advanced
     assert proc.last_derive_episode_count() == 5
+
+
+def test_maybe_derive_passes_requested_model_id():
+    sem, epi, proc = _new_stores()
+    for i in range(5):
+        epi.log(EpisodicEvent(place_name=f"P{i}", notes=f"visit {i}"))
+
+    seen: list[str] = []
+
+    def factory(model_id: str):
+        seen.append(model_id)
+        return FakeAgentModel(response='{"patterns": []}')
+
+    maybe_derive_procedural(
+        model_factory=factory,
+        episode_threshold=5,
+        semantic=sem,
+        episodic=epi,
+        procedural=proc,
+        model_id="mistral/mistral-small-latest",
+    )
+    assert seen == ["mistral/mistral-small-latest"]

@@ -28,10 +28,26 @@ def host_of(url: str) -> str:
     return parsed.netloc or url
 
 
+def format_trace(trace: ActionTrace) -> str:
+    """Render a compact multi-line action trace for logs/debug."""
+    if not trace:
+        return "(no actions)"
+
+    lines: list[str] = []
+    for i, (action_name, args) in enumerate(trace, start=1):
+        rendered_args = ", ".join(f"{k}={v!r}" for k, v in sorted(args.items()))
+        if rendered_args:
+            lines.append(f"{i}. {action_name}({rendered_args})")
+        else:
+            lines.append(f"{i}. {action_name}()")
+    return "\n".join(lines)
+
+
 def save_trace(url: str, trace: ActionTrace) -> None:
     host = host_of(url)
     _CACHE[host] = list(trace)
     logger.info("cached parser trace for host=%s (%d actions)", host, len(trace))
+    logger.info("parser trace steps for host=%s\n%s", host, format_trace(trace))
 
 
 def get_trace(url: str) -> ActionTrace | None:

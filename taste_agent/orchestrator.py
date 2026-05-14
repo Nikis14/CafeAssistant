@@ -30,7 +30,6 @@ branch can finalize anything.
 """
 
 from __future__ import annotations
-
 from collections.abc import Callable
 from typing import Any, Literal, TypedDict
 
@@ -39,7 +38,6 @@ from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
-    SystemMessage,
     ToolMessage,
 )
 
@@ -56,6 +54,11 @@ from taste_agent.guardrails import (
 from taste_agent.logging_ import get_logger, trace
 from taste_agent.memory import get_default_procedural, get_default_semantic
 from taste_agent.memory.derive import maybe_derive_procedural
+from taste_agent.memory.gating import (
+    MemoryGateDecision,
+    analyze_memory_relevance,
+    render_window_for_reflection,
+)
 from taste_agent.memory.reflection import ReflectionResult, run_reflection
 from taste_agent.prompts import system_prompt
 from taste_agent.skill_loader import load_all_skills
@@ -63,7 +66,14 @@ from taste_agent.skills.reserve_table.reserve_table import (
     cancel_reservation,
     finalize_reservation,
 )
-from taste_agent.tools import geocode, memory_read, memory_search, web_search
+from taste_agent.tools import (
+    geocode,
+    memory_read,
+    memory_search,
+    place_discovery,
+    place_web_fallback,
+    web_search,
+)
 
 logger = get_logger(__name__)
 
@@ -73,47 +83,130 @@ logger = get_logger(__name__)
 ModelFactory = Callable[[str], BaseChatModel]
 
 
+def _chat_model_kwargs(model_id: str) -> dict[str, Any]:
+    """Return LiteLLM kwargs that are compatible with the target model."""
+    normalized = model_id.lower()
+    if normalized.startswith("openai/gpt-5"):
+        return {}
+    return {"temperature": 0.2}
+
+
 def _default_model_factory(model_id: str) -> BaseChatModel:
     """Build a ChatLiteLLM for the given model id. Imports are lazy so tests
     that inject a fake factory don't need LiteLLM installed.
     """
     from langchain_litellm import ChatLiteLLM
 
-    return ChatLiteLLM(model=model_id, temperature=0.2)
+    class DebugChatLiteLLM(ChatLiteLLM):
+        """Temporary debug wrapper: prints every internal model payload."""
+
+        def _generate(
+            self,
+            messages: list[BaseMessage],
+            stop: list[str] | None = None,
+            run_manager: Any | None = None,
+            stream: bool | None = None,
+            **kwargs: Any,
+        ) -> Any:
+            should_stream = stream if stream is not None else self.streaming
+            if should_stream:
+                return super()._generate(
+                    messages,
+                    stop=stop,
+                    run_manager=run_manager,
+                    stream=stream,
+                    **kwargs,
+                )
+
+            message_dicts, params = self._create_message_dicts(messages, stop)
+
+            print("\n=== MODEL CALL START ===")
+            for i, m in enumerate(messages):
+                print(f"[lc {i}] {type(m).__name__}: {m!r}")
+            print("--- serialized payload ---")
+            for i, m in enumerate(message_dicts):
+                print(f"[api {i}] {m}")
+            print("=== MODEL CALL END ===\n")
+
+            params = {**params, **kwargs}
+            response = self.completion_with_retry(
+                messages=message_dicts,
+                run_manager=run_manager,
+                **params,
+            )
+            return self._create_chat_result(response)
+
+    return DebugChatLiteLLM(model=model_id, **_chat_model_kwargs(model_id))
 
 
-# ── Agent construction (cached per (model_id, factory)) ──────────────────────
-# Cache key includes the factory identity so injecting a different factory
-# (e.g. in tests or memory-aware factories) produces a fresh agent rather
-# than returning a stale one built with the previous factory.
-_AGENT_CACHE: dict[tuple[str, int], Any] = {}
+# ── Agent construction ───────────────────────────────────────────────────────
+# We cache the *expensive parts* — skill loading + tool list construction +
+# LLM instantiation — per (model_id, factory). The cheap part — calling
+# create_agent to compile the graph — runs fresh each turn so the
+# ``system_prompt`` (which carries current facts + patterns + timestamp)
+# stays fresh. The graph compile is millisecond-cheap.
+#
+# Why pass ``system_prompt=`` to ``create_agent`` instead of prepending a
+# SystemMessage to ``messages``: some providers (Mistral notably) reject
+# message lists that don't end on User / Tool / Assistant-with-prefix.
+# Letting ``create_agent`` own the system slot keeps every interior call
+# of the ReAct loop well-formed for those providers.
+_AGENT_PARTS_CACHE: dict[tuple[str, int], tuple[Any, list[Any]]] = {}
 
 
-def _build_agent_uncached(model_id: str, factory: ModelFactory) -> Any:
-    """Construct a fresh agent. No caching. Imports langchain lazily."""
-    # create_agent is the LangChain 1.0 replacement for
-    # langgraph.prebuilt.create_react_agent.
+def _get_agent_parts(
+    model_id: str, factory: ModelFactory
+) -> tuple[Any, list[Any]]:
+    """Return ``(llm, tools)`` for the given model + factory, cached.
+
+    Cache key includes ``id(factory)`` so injecting a fake factory in tests
+    doesn't return a stale ChatLiteLLM-backed agent.
+    """
+    cache_key = (model_id, id(factory))
+    if cache_key not in _AGENT_PARTS_CACHE:
+        logger.info("building agent parts for model=%s", model_id)
+        skills = load_all_skills(SKILLS_DIR)
+        tools = [
+            geocode,
+            memory_read,
+            memory_search,
+            web_search,
+            place_web_fallback,
+            place_discovery,
+            *skills,
+        ]
+        llm = factory(model_id)
+        _AGENT_PARTS_CACHE[cache_key] = (llm, tools)
+    return _AGENT_PARTS_CACHE[cache_key]
+
+
+def build_agent(
+    model_id: str,
+    model_factory: ModelFactory | None = None,
+    *,
+    system_prompt_text: str | None = None,
+) -> Any:
+    """Build a ReAct agent. Cheap to call repeatedly (only the graph compile
+    runs per call; LLM + tools are cached).
+
+    Args:
+        model_id: LiteLLM model identifier.
+        model_factory: optional override; tests inject fakes here.
+        system_prompt_text: rendered system prompt passed to ``create_agent``.
+            When None, no system prompt is set on the agent.
+    """
     from langchain.agents import create_agent
 
-    skills = load_all_skills(SKILLS_DIR)
-    tools = [geocode, memory_read, memory_search, web_search, *skills]
-    llm = factory(model_id)
+    factory = model_factory or _default_model_factory
+    llm, tools = _get_agent_parts(model_id, factory)
+    if system_prompt_text is not None:
+        return create_agent(llm, tools, system_prompt=system_prompt_text)
     return create_agent(llm, tools)
 
 
-def build_agent(model_id: str, model_factory: ModelFactory | None = None) -> Any:
-    """Return a ReAct agent for the given model id, building once per (id, factory)."""
-    factory = model_factory or _default_model_factory
-    cache_key = (model_id, id(factory))
-    if cache_key not in _AGENT_CACHE:
-        logger.info("building agent for model=%s", model_id)
-        _AGENT_CACHE[cache_key] = _build_agent_uncached(model_id, factory)
-    return _AGENT_CACHE[cache_key]
-
-
 def reset_agent_cache() -> None:
-    """Clear the build cache. Useful in tests."""
-    _AGENT_CACHE.clear()
+    """Clear the agent-parts cache. Useful in tests."""
+    _AGENT_PARTS_CACHE.clear()
 
 
 # ── Approval-intent detection (deterministic) ────────────────────────────────
@@ -280,6 +373,10 @@ class OrchestratorState(TypedDict, total=False):
     # ── Set by output_guardrail_node ──
     out_guard: OutputGuardrailResult
 
+    # ── Set by memory_gate_node ──
+    memory_gate: MemoryGateDecision
+    memory_window_text: str
+
     # ── Set by reflection_node ──
     reflection_result: ReflectionResult
 
@@ -382,13 +479,24 @@ def cancel_node(state: OrchestratorState) -> dict[str, Any]:
 
 
 def agent_node(state: OrchestratorState) -> dict[str, Any]:
-    """Invoke the ReAct agent with injected memory facts + patterns + history."""
+    """Invoke the ReAct agent with injected memory facts + patterns + history.
+
+    The system prompt is passed via ``create_agent``'s ``system_prompt=``
+    parameter (NOT prepended to the messages list) so the agent's interior
+    loop produces well-formed message ordering for strict providers like
+    Mistral. Messages we pass are just ``[*history, current_user_message]``.
+    """
     facts = get_default_semantic().as_dict()
     patterns_text = get_default_procedural().as_text()
-    agent = build_agent(state["model_id"], model_factory=state.get("model_factory"))
+    sys_prompt_text = system_prompt(facts=facts, patterns_text=patterns_text)
+
+    agent = build_agent(
+        state["model_id"],
+        model_factory=state.get("model_factory"),
+        system_prompt_text=sys_prompt_text,
+    )
 
     messages: list[BaseMessage] = [
-        SystemMessage(content=system_prompt(facts=facts, patterns_text=patterns_text)),
         *state["history"],
         HumanMessage(content=state["cleaned_text"]),
     ]
@@ -396,6 +504,7 @@ def agent_node(state: OrchestratorState) -> dict[str, Any]:
         result = agent.invoke({"messages": messages})
 
     all_msgs: list[BaseMessage] = result["messages"]
+
     final = all_msgs[-1]
     response_text = (
         _extract_text(final) if isinstance(final, AIMessage) else str(final.content)
@@ -422,7 +531,25 @@ def output_guardrail_node(state: OrchestratorState) -> dict[str, Any]:
         )
         return {
             "out_guard": out_guard,
-            "response_text": out_guard.response_text + _format_output_note(out_guard),
+            "response_text": out_guard.response_text,
+        }
+
+
+def memory_gate_node(state: OrchestratorState) -> dict[str, Any]:
+    """Analyze a short recent dialogue window and decide whether reflection
+    should run on this turn."""
+    with trace("node:memory_gate"):
+        clean_response = state["out_guard"].response_text
+        decision = analyze_memory_relevance(
+            state["history"],
+            state["cleaned_text"],
+            clean_response,
+        )
+        return {
+            "memory_gate": decision,
+            "memory_window_text": render_window_for_reflection(
+                decision.window_messages
+            ),
         }
 
 
@@ -430,6 +557,10 @@ def reflection_node(state: OrchestratorState) -> dict[str, Any]:
     """Run the reflection sub-agent (env-controlled). Updates semantic +
     episodic memory automatically based on what the user said this turn."""
     with trace("node:reflection"):
+        decision = state.get("memory_gate")
+        if decision is not None and not decision.should_reflect:
+            return {"reflection_result": ReflectionResult(skipped=True)}
+
         out_factory = state.get("model_factory") or _default_model_factory
         # Use the PII-stripped response WITHOUT the guardrail note — the note
         # is meta-content; reflection should see what the user sees as the
@@ -438,7 +569,13 @@ def reflection_node(state: OrchestratorState) -> dict[str, Any]:
         collector = run_reflection(
             user_message=state["cleaned_text"],
             agent_response=clean_response,
+            conversation_window=state.get("memory_window_text"),
+            gate_reason=decision.reason if decision is not None else None,
+            allow_clarification=(
+                decision.allow_clarification if decision is not None else True
+            ),
             model_factory=out_factory,
+            model_id=state["model_id"],
             skip=state.get("skip_reflection"),
         )
         return {"reflection_result": collector}
@@ -449,7 +586,10 @@ def procedural_derive_node(state: OrchestratorState) -> dict[str, Any]:
     episodes accumulated since the last derivation (default: 5)."""
     with trace("node:procedural_derive"):
         out_factory = state.get("model_factory") or _default_model_factory
-        ran = maybe_derive_procedural(model_factory=out_factory)
+        ran = maybe_derive_procedural(
+            model_factory=out_factory,
+            model_id=state["model_id"],
+        )
         if ran:
             logger.info("procedural patterns derived this turn")
         return {"procedural_derived": ran}
@@ -476,6 +616,18 @@ def format_agent_response_node(state: OrchestratorState) -> dict[str, Any]:
             "output_guard": out_guard.summary_for_debug(),
             "procedural_derived": bool(state.get("procedural_derived")),
         }
+        gate = state.get("memory_gate")
+        if gate is not None:
+            debug["memory_gate"] = {
+                "should_reflect": gate.should_reflect,
+                "allow_clarification": gate.allow_clarification,
+                "semantic_candidate": gate.semantic_candidate,
+                "episodic_candidate": gate.episodic_candidate,
+                "transactional_only": gate.transactional_only,
+                "task_clarification_only": gate.task_clarification_only,
+                "reason": gate.reason,
+                "window_messages": len(gate.window_messages),
+            }
 
         # Reflection details — surface the writes / conflicts / clarifications
         # so the Gradio sidebar can show "memory just changed".
@@ -576,6 +728,7 @@ def _build_orchestrator_graph() -> Any:
     g.add_node("cancel", cancel_node)
     g.add_node("agent", agent_node)
     g.add_node("output_guardrail", output_guardrail_node)
+    g.add_node("memory_gate", memory_gate_node)
     g.add_node("reflection", reflection_node)
     g.add_node("procedural_derive", procedural_derive_node)
     g.add_node("format_agent_response", format_agent_response_node)
@@ -594,12 +747,13 @@ def _build_orchestrator_graph() -> Any:
     )
     g.add_edge("finalize", END)
     g.add_edge("cancel", END)
-    # Agent path: agent → output_guardrail → reflection → procedural_derive
-    # → format_agent_response → END. Reflection and procedural_derive both
-    # update memory in the background; format_agent_response weaves any
-    # clarifications from reflection into the user-facing reply.
+    # Agent path: agent → output_guardrail → memory_gate → reflection
+    # → procedural_derive → format_agent_response → END. Reflection and
+    # procedural_derive update memory in the background; format_agent_response
+    # weaves any clarifications from reflection into the user-facing reply.
     g.add_edge("agent", "output_guardrail")
-    g.add_edge("output_guardrail", "reflection")
+    g.add_edge("output_guardrail", "memory_gate")
+    g.add_edge("memory_gate", "reflection")
     g.add_edge("reflection", "procedural_derive")
     g.add_edge("procedural_derive", "format_agent_response")
     g.add_edge("format_agent_response", END)

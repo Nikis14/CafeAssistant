@@ -1,0 +1,198 @@
+"""Parallel place discovery: structured places + web enrichment merged.
+
+This tool is the default discovery path for venue recommendations. It runs the
+structured places API search and the web fallback in parallel, then merges the
+results into one normalized candidate list.
+"""
+
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+import re
+from typing import Any, TypedDict
+
+from langchain_core.tools import tool
+
+from taste_agent.logging_ import get_logger, trace
+from taste_agent.skills.places_search.places_search import run as places_search_run
+from taste_agent.tools.place_web_fallback import place_web_fallback
+
+logger = get_logger(__name__)
+
+
+class _DiscoveryState(TypedDict, total=False):
+    query: str
+    location: str
+    max_results: int
+    places_results: list[dict[str, Any]]
+    web_results: list[dict[str, Any]]
+    merged_results: list[dict[str, Any]]
+
+
+def _places_node(state: _DiscoveryState) -> dict[str, Any]:
+    with trace("tool:place_discovery:places", query=state["query"][:80]):
+        results = places_search_run(
+            state["query"],
+            state["location"],
+            state["max_results"],
+        )
+    return {"places_results": results}
+
+
+def _web_node(state: _DiscoveryState) -> dict[str, Any]:
+    with trace("tool:place_discovery:web", query=state["query"][:80]):
+        results = place_web_fallback.invoke(
+            {
+                "query": state["query"],
+                "location": state["location"],
+                "max_results": state["max_results"],
+            }
+        )
+    return {"web_results": results}
+
+
+def _normalize_name(name: str) -> str:
+    lowered = name.lower().strip()
+    lowered = re.sub(r"[^\w\s]", " ", lowered)
+    lowered = re.sub(r"\s+", " ", lowered)
+    return lowered
+
+
+def _is_error_result(item: dict[str, Any]) -> bool:
+    return item.get("status") == "error" or item.get("source") == "error"
+
+
+def _merge_reason(places_reason: str, web_reason: str) -> str:
+    if places_reason and web_reason:
+        return f"{places_reason} Web: {web_reason}"
+    return places_reason or web_reason
+
+
+def _merge_results(
+    places_results: list[dict[str, Any]],
+    web_results: list[dict[str, Any]],
+    *,
+    max_results: int,
+) -> list[dict[str, Any]]:
+    places_ok = [r for r in places_results if not _is_error_result(r) and r.get("name")]
+    web_ok = [r for r in web_results if not _is_error_result(r) and r.get("name")]
+
+    if not places_ok and not web_ok:
+        return places_results[:1] or web_results[:1] or [
+            {
+                "name": "",
+                "address": "",
+                "reason": "Place discovery returned no usable results.",
+                "review_snippet": None,
+                "website_url": "",
+                "reservation_url": "",
+                "phone": "",
+                "maps_url": "",
+                "source": "error",
+                "status": "error",
+            }
+        ]
+
+    web_by_name = {_normalize_name(r["name"]): r for r in web_ok}
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for place in places_ok:
+        key = _normalize_name(str(place.get("name", "")))
+        web_match = web_by_name.get(key)
+        if web_match is None:
+            for candidate_key, candidate in web_by_name.items():
+                if key and (key in candidate_key or candidate_key in key):
+                    web_match = candidate
+                    break
+        merged_item = dict(place)
+        if web_match is not None:
+            merged_item["reason"] = _merge_reason(
+                str(place.get("reason", "")),
+                str(web_match.get("reason", "")),
+            )
+            if not merged_item.get("review_snippet"):
+                merged_item["review_snippet"] = web_match.get("review_snippet")
+            if not merged_item.get("website_url"):
+                merged_item["website_url"] = web_match.get("website_url", "")
+            if not merged_item.get("maps_url"):
+                merged_item["maps_url"] = web_match.get("maps_url", "")
+            merged_item["source"] = "places+web"
+        seen.add(key)
+        merged.append(merged_item)
+
+    for web_item in web_ok:
+        key = _normalize_name(str(web_item.get("name", "")))
+        if key and key in seen:
+            continue
+        merged.append(dict(web_item))
+
+    return merged[:max_results]
+
+
+def _merge_node(state: _DiscoveryState) -> dict[str, Any]:
+    merged = _merge_results(
+        state.get("places_results", []),
+        state.get("web_results", []),
+        max_results=state["max_results"],
+    )
+    return {"merged_results": merged}
+
+
+def _run_parallel(state: _DiscoveryState) -> dict[str, Any]:
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        places_future = pool.submit(_places_node, state)
+        web_future = pool.submit(_web_node, state)
+        return {
+            **places_future.result(),
+            **web_future.result(),
+        }
+
+
+_GRAPH: Any | None = None
+
+
+def _get_graph() -> Any:
+    global _GRAPH
+    if _GRAPH is None:
+        from langgraph.graph import END, StateGraph
+
+        g: Any = StateGraph(_DiscoveryState)
+        g.add_node("parallel_search", _run_parallel)
+        g.add_node("merge", _merge_node)
+        g.set_entry_point("parallel_search")
+        g.add_edge("parallel_search", "merge")
+        g.add_edge("merge", END)
+        _GRAPH = g.compile()
+    return _GRAPH
+
+
+def reset_graph_cache() -> None:
+    global _GRAPH
+    _GRAPH = None
+
+
+@tool
+def place_discovery(
+    query: str, location: str = "Belgrade", max_results: int = 5
+) -> list[dict[str, Any]]:
+    """Discover restaurant/cafe candidates by combining structured places and web.
+
+    Use this as the default venue-discovery tool when the user wants
+    recommendations. It returns one merged normalized candidate list.
+    """
+    initial_state: _DiscoveryState = {
+        "query": query,
+        "location": location,
+        "max_results": max_results,
+    }
+    with trace("tool:place_discovery", query=query[:80], location=location):
+        final_state = _get_graph().invoke(initial_state)
+    results = final_state["merged_results"]
+    logger.info(
+        "place_discovery returned %d merged result(s) for %r in %r",
+        len(results),
+        query[:60],
+        location,
+    )
+    return results

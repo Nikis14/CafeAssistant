@@ -29,6 +29,19 @@ logger = get_logger(__name__)
 _ENV_KEY = "TAVILY_API_KEY"
 
 
+def _sentinel_result(query: str, message: str) -> list[dict[str, Any]]:
+    """Return a non-empty result payload for no-result / error cases."""
+    return [
+        {
+            "title": "Web search unavailable",
+            "url": "",
+            "content": f"{message} Query: {query}",
+            "score": 0.0,
+            "status": "error",
+        }
+    ]
+
+
 def _do_search(query: str, max_results: int) -> list[dict[str, Any]]:
     """Synchronous search via the Tavily SDK.
 
@@ -37,8 +50,8 @@ def _do_search(query: str, max_results: int) -> list[dict[str, Any]]:
     """
     api_key = os.environ.get(_ENV_KEY)
     if not api_key:
-        logger.warning("%s not set; web_search returning empty list", _ENV_KEY)
-        return []
+        logger.warning("%s not set; web_search returning sentinel result", _ENV_KEY)
+        return _sentinel_result(query, f"{_ENV_KEY} is not set.")
 
     from tavily import TavilyClient
 
@@ -49,7 +62,7 @@ def _do_search(query: str, max_results: int) -> list[dict[str, Any]]:
         search_depth="basic",
     )
     raw_results = response.get("results", []) if isinstance(response, dict) else []
-    return [
+    results = [
         {
             "title": str(r.get("title", "")),
             "url": str(r.get("url", "")),
@@ -58,6 +71,9 @@ def _do_search(query: str, max_results: int) -> list[dict[str, Any]]:
         }
         for r in raw_results
     ]
+    if not results:
+        return _sentinel_result(query, "No web search results were returned.")
+    return results
 
 
 @tool
@@ -75,6 +91,8 @@ def web_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
     """
     with trace("tool:web_search", query=query[:80], max_results=max_results):
         results = _do_search(query, max_results=max_results)
+        if not results:
+            results = _sentinel_result(query, "No web search results were returned.")
         logger.info("web_search returned %d result(s) for %r", len(results), query[:60])
         return results
 

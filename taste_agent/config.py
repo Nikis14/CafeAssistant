@@ -16,16 +16,16 @@ class ModelChoice:
 
 
 MODEL_REGISTRY: list[ModelChoice] = [
-    ModelChoice("Claude Sonnet 4.6", "anthropic/claude-sonnet-4-6", "ANTHROPIC_API_KEY"),
-    ModelChoice("Claude Haiku 4.5", "anthropic/claude-haiku-4-5", "ANTHROPIC_API_KEY"),
+    ModelChoice("Mistral Small", "mistral/mistral-small-latest", "MISTRAL_API_KEY"),
     ModelChoice("GPT-5", "openai/gpt-5", "OPENAI_API_KEY"),
     ModelChoice("GPT-5 mini", "openai/gpt-5-mini", "OPENAI_API_KEY"),
     ModelChoice("GPT-5 nano", "openai/gpt-5-nano", "OPENAI_API_KEY"),
     ModelChoice("Gemini 2.5 Flash", "gemini/gemini-2.5-flash", "GOOGLE_API_KEY"),
-    ModelChoice("Mistral Small", "mistral/mistral-small-latest", "MISTRAL_API_KEY"),
+    ModelChoice("Claude Sonnet 4.6", "anthropic/claude-sonnet-4-6", "ANTHROPIC_API_KEY"),
+    ModelChoice("Claude Haiku 4.5", "anthropic/claude-haiku-4-5", "ANTHROPIC_API_KEY"),
 ]
 
-DEFAULT_MODEL_ID: str = "anthropic/claude-sonnet-4-6"
+DEFAULT_MODEL_ID: str = "mistral/mistral-small-latest"
 
 # Filesystem layout
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent

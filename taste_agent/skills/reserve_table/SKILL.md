@@ -16,6 +16,8 @@ Invoke this skill when the user has expressed a clear intent to book a table or 
 
 If any required detail is missing (date, time, party size, contact name), ask the user before calling this skill. Reservations are irreversible — the skill is designed to surface a confirmation prompt before any submit happens, but it should not be invoked with partial information that would force the sub-agent to guess.
 
+Do not invent the reservation page URL. Invoke this skill only when `reservation_url` is grounded in tool output or another deterministic discovery step. A venue homepage is not enough unless it is explicitly the booking page.
+
 ## Inputs
 
 - `place_name` (str, required): human-readable place name.

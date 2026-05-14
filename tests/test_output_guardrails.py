@@ -8,6 +8,7 @@ from taste_agent.guardrails.output import (
     OutputGuardrailResult,
     _parse_judge_output,
     redact_output_pii,
+    rewrite_internal_error_leaks,
     run_output_guardrails,
 )
 from tests.fakes import FakeAgentModel
@@ -27,6 +28,15 @@ def test_redact_pii_strips_phone():
     cleaned, n, _concerns = redact_output_pii("Call +381 64 123 4567 to book")
     assert "[REDACTED-PHONE]" in cleaned
     assert n == 1
+
+
+def test_redact_pii_does_not_strip_iso_date_as_phone():
+    cleaned, n, concerns = redact_output_pii(
+        "Prepared for 2026-05-15 at 12:00 for 2 people."
+    )
+    assert cleaned == "Prepared for 2026-05-15 at 12:00 for 2 people."
+    assert n == 0
+    assert concerns == []
 
 
 def test_redact_pii_strips_card():
@@ -59,6 +69,28 @@ def test_redact_pii_clean_text_unchanged():
     assert cleaned == text
     assert n == 0
     assert concerns == []
+
+
+def test_rewrite_internal_error_leaks_drops_provider_details():
+    text = (
+        "The live Places search chunk is returning an authorization error, so I can’t pull "
+        "up live options right now. I can still help with web-based picks."
+    )
+    cleaned, rewritten, concerns = rewrite_internal_error_leaks(text)
+    assert rewritten is True
+    assert "authorization error" not in cleaned.lower()
+    assert "live Places search" not in cleaned
+    assert "web-based picks" in cleaned
+    assert concerns
+
+
+def test_rewrite_internal_error_leaks_falls_back_to_generic_message():
+    text = "TAVILY_API_KEY is not set."
+    cleaned, rewritten, concerns = rewrite_internal_error_leaks(text)
+    assert rewritten is True
+    assert "TAVILY_API_KEY" not in cleaned
+    assert "search sources" in cleaned
+    assert concerns
 
 
 # ── _parse_judge_output ──────────────────────────────────────────────────────
@@ -101,6 +133,16 @@ def test_skip_judge_runs_pii_only():
     assert "[REDACTED-EMAIL]" in result.response_text
     assert result.pii_leaked == 1
     assert result.factuality_ok is True  # default when judge skipped
+
+
+def test_run_output_guardrails_rewrites_internal_error_leaks():
+    result = run_output_guardrails(
+        "The live Places search chunk is returning an authorization error. I can still help with web-based picks.",
+        skip_judge=True,
+    )
+    assert result.internal_error_rewritten is True
+    assert "authorization error" not in result.response_text.lower()
+    assert "web-based picks" in result.response_text
 
 
 def test_no_model_factory_implies_skip_judge():
@@ -240,22 +282,34 @@ def test_resolve_judge_override_env_takes_precedence(monkeypatch):
     assert resolve_judge_model_id() == "openai/gpt-5-mini"
 
 
-def test_resolve_judge_uses_default_when_anthropic_key_present(monkeypatch):
+def test_resolve_judge_uses_mistral_default_when_key_present(monkeypatch):
     from taste_agent.guardrails.output import resolve_judge_model_id
 
     monkeypatch.delenv("TASTE_AGENT_SKIP_OUTPUT_JUDGE", raising=False)
     monkeypatch.delenv("TASTE_AGENT_JUDGE_MODEL_ID", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("MISTRAL_API_KEY", "fake-mistral-key")
+    assert resolve_judge_model_id() == "mistral/mistral-medium-3-5"
+
+
+def test_resolve_judge_falls_back_to_anthropic_when_mistral_missing(monkeypatch):
+    from taste_agent.guardrails.output import resolve_judge_model_id
+
+    monkeypatch.delenv("TASTE_AGENT_SKIP_OUTPUT_JUDGE", raising=False)
+    monkeypatch.delenv("TASTE_AGENT_JUDGE_MODEL_ID", raising=False)
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key")
     assert resolve_judge_model_id() == "anthropic/claude-haiku-4-5"
 
 
 def test_resolve_judge_skips_when_no_key_and_no_override(monkeypatch):
-    """The bug Plan-agent flagged: if Anthropic key is missing and there's
-    no override, the judge should auto-skip rather than crash inside LiteLLM."""
+    """If neither judge provider key is present and there's no override, the
+    judge should auto-skip rather than crash inside LiteLLM."""
     from taste_agent.guardrails.output import resolve_judge_model_id
 
     monkeypatch.delenv("TASTE_AGENT_SKIP_OUTPUT_JUDGE", raising=False)
     monkeypatch.delenv("TASTE_AGENT_JUDGE_MODEL_ID", raising=False)
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert resolve_judge_model_id() is None
 
@@ -264,6 +318,7 @@ def test_run_output_guardrails_auto_skips_when_env_unresolved(monkeypatch):
     """No env hints at all → run_output_guardrails should skip the judge."""
     monkeypatch.delenv("TASTE_AGENT_SKIP_OUTPUT_JUDGE", raising=False)
     monkeypatch.delenv("TASTE_AGENT_JUDGE_MODEL_ID", raising=False)
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     factory = _judge_factory("ignored — judge should not be invoked")

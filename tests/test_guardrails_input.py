@@ -52,6 +52,13 @@ def test_redact_pii_does_not_match_short_digit_sequences():
     assert cleaned == text
 
 
+def test_redact_pii_does_not_match_iso_date():
+    text = "Book it for 2026-05-15 at 12:00 please"
+    cleaned, n = redact_pii(text)
+    assert n == 0
+    assert cleaned == text
+
+
 def test_redact_pii_multiple_kinds():
     text = "Email jane@x.com or call +381 64 123 4567"
     cleaned, n = redact_pii(text)

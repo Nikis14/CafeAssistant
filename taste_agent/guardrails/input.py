@@ -19,9 +19,11 @@ logger = get_logger(__name__)
 # seminar so students can see the mechanism without an external service.
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 # Match phone-like sequences: 8-15 digits, optionally separated by a single
-# space, dash, or paren character between digits. Tighter than `\d[...]{7,}\d`
-# which can drift into prose like "open 9 to 22 daily Mon-Fri 9 to 5".
-PHONE_RE = re.compile(r"\+?(?:\d[\s\-()]?){7,14}\d")
+# space, dash, or paren character between digits. Excludes ISO-like dates such
+# as ``2026-05-15`` which otherwise look phone-like to a naive regex.
+PHONE_RE = re.compile(
+    r"(?<!\d)(?!\d{4}-\d{2}-\d{2}\b)\+?(?:\d[\s\-()]?){7,14}\d(?!\d)"
+)
 CARD_RE = re.compile(r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b")
 
 # ── Prompt-injection heuristics ──────────────────────────────────────────────

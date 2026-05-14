@@ -228,3 +228,22 @@ def test_run_reflection_request_clarification_collected(monkeypatch):
     assert len(result.clarifications) == 1
     assert "dietary" in result.clarifications[0]
     assert result.tool_calls == 1
+
+
+def test_run_reflection_passes_requested_model_id(monkeypatch):
+    from tests.fakes import FakeToolCallingChatModel
+
+    monkeypatch.setenv("TASTE_AGENT_SKIP_REFLECTION", "0")
+    seen: list[str] = []
+
+    def factory(model_id: str):
+        seen.append(model_id)
+        return FakeToolCallingChatModel(responses=["done"])
+
+    run_reflection(
+        user_message="hi",
+        agent_response="hello",
+        model_factory=factory,
+        model_id="mistral/mistral-small-latest",
+    )
+    assert seen == ["mistral/mistral-small-latest"]

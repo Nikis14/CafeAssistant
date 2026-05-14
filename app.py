@@ -61,7 +61,7 @@ def _session_id_of(request: gr.Request | None) -> str:
 
 
 def _gradio_history_to_messages(
-    history: list[dict[str, str]] | list[tuple[str, str]],
+    history: list[dict[str, Any]] | list[tuple[str, str]],
 ) -> list[BaseMessage]:
     """Convert Gradio chatbot history to LangChain messages.
 
@@ -72,7 +72,7 @@ def _gradio_history_to_messages(
     for entry in history:
         if isinstance(entry, dict):
             role = entry.get("role")
-            content = entry.get("content", "")
+            content = _content_to_text(entry.get("content", ""))
             if not content:
                 continue
             if role == "user":
@@ -86,6 +86,29 @@ def _gradio_history_to_messages(
             if ai:
                 msgs.append(AIMessage(content=ai))
     return msgs
+
+
+def _content_to_text(content: Any) -> str:
+    """Best-effort text extraction from Gradio message content.
+
+    Gradio message ``content`` is usually a string but may also be a list of
+    content blocks. For title generation and LangChain history conversion we
+    only want user-visible text.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                if part.get("type") == "text":
+                    parts.append(str(part.get("text", "")))
+                elif "content" in part and isinstance(part["content"], str):
+                    parts.append(part["content"])
+        return "".join(parts)
+    return str(content) if content is not None else ""
 
 
 def chat_fn(
@@ -190,11 +213,11 @@ def _new_conversation_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-def _title_for(history: list[dict[str, str]]) -> str:
+def _title_for(history: list[dict[str, Any]]) -> str:
     """Use the first user message (truncated) as the conversation title."""
     for msg in history:
         if isinstance(msg, dict) and msg.get("role") == "user":
-            text = (msg.get("content") or "").strip()
+            text = _content_to_text(msg.get("content")).strip()
             if text:
                 if len(text) > _TITLE_MAXLEN:
                     return text[:_TITLE_MAXLEN] + "..."
@@ -250,10 +273,27 @@ def send_message(
     model_label: str,
     request: gr.Request | None = None,
 ) -> tuple[Any, ...]:
-    """Wire to the textbox submit / Send button.
+    """Backward-compatible single-step send used by tests and non-UI callers."""
+    staged = stage_user_message(user_msg, chat_history, conversations, active_id)
+    staged_history, staged_conversations, staged_active, radio_update, cleared = staged
+    if staged_history == chat_history and cleared == "":
+        return staged
+    return complete_assistant_message(
+        staged_history,
+        staged_conversations,
+        staged_active,
+        model_label,
+        request,
+    ) + (cleared,)
 
-    Auto-creates a conversation on the first send if none is active.
-    """
+
+def stage_user_message(
+    user_msg: str,
+    chat_history: list[dict[str, str]],
+    conversations: dict[str, list[dict[str, str]]],
+    active_id: str | None,
+) -> tuple[Any, ...]:
+    """Append the user's message immediately so the UI updates before inference."""
     if not user_msg or not user_msg.strip():
         # No-op: return unchanged state + cleared input
         return (
@@ -264,27 +304,18 @@ def send_message(
             "",
         )
 
-    # Ensure an active conversation exists
     if active_id is None or active_id not in conversations:
         active_id = _new_conversation_id()
         conversations = {**conversations, active_id: []}
 
-    # Call the orchestrator with the PRIOR conversation history. The current
-    # user message lives in the ``user_msg`` parameter; ``chat_fn`` / agent_node
-    # adds it once to the message list. Appending it here AND passing it
-    # separately would send the same turn to the model twice.
-    response = chat_fn(user_msg, chat_history, model_label, request)
-    history_with_reply = [
+    staged_history = [
         *chat_history,
         {"role": "user", "content": user_msg},
-        {"role": "assistant", "content": response},
     ]
-
-    # Persist
-    updated_conversations = {**conversations, active_id: history_with_reply}
+    updated_conversations = {**conversations, active_id: staged_history}
 
     return (
-        history_with_reply,
+        staged_history,
         updated_conversations,
         active_id,
         gr.update(choices=_conv_choices(updated_conversations), value=active_id),
@@ -292,11 +323,54 @@ def send_message(
     )
 
 
+def complete_assistant_message(
+    chat_history: list[dict[str, str]],
+    conversations: dict[str, list[dict[str, str]]],
+    active_id: str | None,
+    model_label: str,
+    request: gr.Request | None = None,
+) -> tuple[Any, ...]:
+    """Complete the assistant turn after the user message is already staged."""
+    if not chat_history or active_id is None or active_id not in conversations:
+        return (
+            chat_history,
+            conversations,
+            active_id,
+            gr.update(choices=_conv_choices(conversations), value=active_id),
+        )
+
+    last = chat_history[-1]
+    if not isinstance(last, dict) or last.get("role") != "user":
+        return (
+            chat_history,
+            conversations,
+            active_id,
+            gr.update(choices=_conv_choices(conversations), value=active_id),
+        )
+
+    user_msg = _content_to_text(last.get("content", ""))
+    prior_history = chat_history[:-1]
+    response = chat_fn(user_msg, prior_history, model_label, request)
+    history_with_reply = [
+        *chat_history,
+        {"role": "assistant", "content": response},
+    ]
+    updated_conversations = {**conversations, active_id: history_with_reply}
+    return (
+        history_with_reply,
+        updated_conversations,
+        active_id,
+        gr.update(choices=_conv_choices(updated_conversations), value=active_id),
+    )
+
+
 # ── UI assembly ─────────────────────────────────────────────────────────────
 
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="Taste Agent", theme=gr.themes.Soft()) as app:
+    # Gradio 6.0 moved ``theme`` from ``Blocks(...)`` to ``launch(...)``. See
+    # the ``__main__`` block at the bottom for the theme pass-through.
+    with gr.Blocks(title="Taste Agent") as app:
         gr.Markdown(
             "# Taste Agent\n"
             "Personalized restaurant & café recommender for Belgrade and beyond. "
@@ -327,7 +401,9 @@ def build_ui() -> gr.Blocks:
 
             # ── Middle: chat ────────────────────────────────────────────
             with gr.Column(scale=3):
-                chatbot = gr.Chatbot(type="messages", height=500, label="Chat")
+                # Gradio 6.0 dropped the ``type`` kwarg from Chatbot — the
+                # messages-dict format is now the only supported shape.
+                chatbot = gr.Chatbot(height=500, label="Chat")
                 with gr.Row():
                     msg_input = gr.Textbox(
                         placeholder="Ask about restaurants, cafés, reservations...",
@@ -388,6 +464,11 @@ def build_ui() -> gr.Blocks:
             chatbot,
             conversations_state,
             active_conv_state,
+        ]
+        send_model_inputs = [
+            chatbot,
+            conversations_state,
+            active_conv_state,
             model_dropdown,
         ]
         send_event_outputs = [
@@ -398,14 +479,22 @@ def build_ui() -> gr.Blocks:
             msg_input,  # cleared after send
         ]
         msg_input.submit(
-            fn=send_message,
+            fn=stage_user_message,
             inputs=send_event_inputs,
             outputs=send_event_outputs,
+        ).then(
+            fn=complete_assistant_message,
+            inputs=send_model_inputs,
+            outputs=[chatbot, conversations_state, active_conv_state, conv_list],
         )
         send_btn.click(
-            fn=send_message,
+            fn=stage_user_message,
             inputs=send_event_inputs,
             outputs=send_event_outputs,
+        ).then(
+            fn=complete_assistant_message,
+            inputs=send_model_inputs,
+            outputs=[chatbot, conversations_state, active_conv_state, conv_list],
         )
 
         # Auto-refresh memory panels on every chatbot change (i.e., after each
@@ -419,4 +508,8 @@ def build_ui() -> gr.Blocks:
 
 
 if __name__ == "__main__":
-    build_ui().launch(server_name="127.0.0.1", server_port=7860)
+    build_ui().launch(
+        server_name="127.0.0.1",
+        server_port=7860,
+        theme=gr.themes.Soft(),
+    )

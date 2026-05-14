@@ -15,10 +15,12 @@ from taste_agent.tools.web_search import _ENV_KEY, web_search
 _ws_module = sys.modules["taste_agent.tools.web_search"]
 
 
-def test_web_search_returns_empty_when_no_api_key(monkeypatch):
+def test_web_search_returns_sentinel_when_no_api_key(monkeypatch):
     monkeypatch.delenv(_ENV_KEY, raising=False)
     result = web_search.invoke({"query": "best cappuccino Belgrade"})
-    assert result == []
+    assert len(result) == 1
+    assert result[0]["status"] == "error"
+    assert _ENV_KEY in result[0]["content"]
 
 
 def test_web_search_returns_normalized_results(monkeypatch):
@@ -52,20 +54,24 @@ def test_web_search_max_results_defaults_to_five(monkeypatch):
 
     def fake_search(query: str, max_results: int):
         captured["max"] = max_results
-        return []
+        return [
+            {"title": "Web search unavailable", "url": "", "content": "fallback", "score": 0.0}
+        ]
 
     monkeypatch.setattr(_ws_module, "_do_search", fake_search)
     web_search.invoke({"query": "x"})
     assert captured["max"] == 5
 
 
-def test_web_search_handles_malformed_tavily_response(monkeypatch):
-    """If Tavily returns something unexpected, the tool returns []."""
+def test_web_search_handles_empty_tavily_results(monkeypatch):
+    """If Tavily yields no hits, the tool returns a non-empty sentinel result."""
     monkeypatch.setenv(_ENV_KEY, "fake-key")
 
     def fake_search(query: str, max_results: int):
-        return []  # _do_search itself defends against missing fields
+        return []
 
     monkeypatch.setattr(_ws_module, "_do_search", fake_search)
     result = web_search.invoke({"query": "anything"})
-    assert result == []
+    assert len(result) == 1
+    assert result[0]["status"] == "error"
+    assert "No web search results" in result[0]["content"]

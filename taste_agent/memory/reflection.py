@@ -1,4 +1,4 @@
-"""Reflection sub-agent: runs after every turn, updates memory automatically.
+"""Reflection sub-agent: runs after selected turns, updates memory automatically.
 
 Why an agent (not a single LLM call): reflection needs to *read* existing
 memory before deciding to *write*. That's a ReAct loop — read with
@@ -11,9 +11,9 @@ Architecture:
   - Its tools are LangChain ``@tool`` functions that share a ``ReflectionResult``
     via a ``ContextVar`` (no global state, no race between concurrent
     reflections — each ``run_reflection`` call sets up its own collector).
-  - The orchestrator calls ``run_reflection(user_msg, agent_response, ...)``
-    after the output guardrail and weaves any returned clarifications into
-    the next reply.
+  - The orchestrator calls ``run_reflection(...)`` after the output guardrail
+    and a deterministic memory-gating step, then weaves any returned
+    clarifications into the next reply.
 
 Cost: one extra LLM call per turn (plus its tool-call iterations). For
 production, run it sampled (every N turns), or batch a window. The seminar
@@ -32,6 +32,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
+from taste_agent.config import DEFAULT_MODEL_ID
 from taste_agent.logging_ import get_logger, trace
 from taste_agent.memory.writes import write_episodic, write_semantic
 from taste_agent.prompts import reflect_prompt
@@ -166,8 +167,11 @@ def run_reflection(
     user_message: str,
     agent_response: str,
     *,
+    conversation_window: str | None = None,
+    gate_reason: str | None = None,
+    allow_clarification: bool = True,
     model_factory: ModelFactory | None = None,
-    model_id: str = "anthropic/claude-haiku-4-5",
+    model_id: str = DEFAULT_MODEL_ID,
     skip: bool | None = None,
 ) -> ReflectionResult:
     """Spawn the reflection sub-agent. Returns the collected writes + clarifications.
@@ -175,6 +179,12 @@ def run_reflection(
     Args:
         user_message: what the user just said this turn.
         agent_response: what the agent replied this turn.
+        conversation_window: serialized recent dialogue window. When present,
+            reflection should reason over this narrower context instead of
+            only the latest user/assistant pair.
+        gate_reason: short debug hint describing why reflection was run.
+        allow_clarification: whether the reflection agent may ask follow-up
+            questions for durable-memory ambiguity.
         model_factory: ``(model_id) -> BaseChatModel`` for the reflection LLM.
             If ``None``, reflection is skipped (graceful fallback).
         model_id: LiteLLM model id; default is Haiku for cost.
@@ -193,22 +203,38 @@ def run_reflection(
         # Lazy import — keeps module load light and tests fast.
         from langchain.agents import create_agent
 
-        tools = [
-            memory_read,
-            memory_search,
-            memorize_semantic,
-            memorize_episodic,
-            request_clarification,
-        ]
+        tools = [memory_read, memory_search, memorize_semantic, memorize_episodic]
+        if allow_clarification:
+            tools.append(request_clarification)
 
         llm = model_factory(model_id)
         agent = create_agent(llm, tools)
 
-        turn_payload = (
-            f"User said: {user_message!r}\n\n"
-            f"Agent replied: {agent_response!r}\n\n"
-            "Reflect on this turn and update memory accordingly. Use your tools."
-        )
+        if conversation_window is None:
+            turn_payload = (
+                f"User said: {user_message!r}\n\n"
+                f"Agent replied: {agent_response!r}\n\n"
+                "Reflect on this turn and update memory accordingly. Use your tools."
+            )
+        else:
+            turn_payload = (
+                "Recent dialogue window:\n"
+                f"{conversation_window}\n\n"
+                f"Current user turn: {user_message!r}\n"
+                f"Current assistant reply: {agent_response!r}\n"
+                f"Reflection trigger reason: {gate_reason or 'unspecified'}\n"
+                f"Clarifications allowed: {'yes' if allow_clarification else 'no'}\n\n"
+                "Reflect only on durable user memory signal from this recent window. "
+                "Ignore pure booking logistics, temporary task references, and "
+                "dialogue-state ambiguity."
+            )
+
+        prompt = reflect_prompt()
+        if not allow_clarification:
+            prompt += (
+                "\n\nFor this run, request_clarification is disabled. "
+                "If a detail is ambiguous, skip writing it instead of asking."
+            )
 
         with trace("sub_agent:reflection", model=model_id):
             try:
@@ -219,7 +245,7 @@ def run_reflection(
                 agent.invoke(
                     {
                         "messages": [
-                            SystemMessage(content=reflect_prompt()),
+                            SystemMessage(content=prompt),
                             HumanMessage(content=turn_payload),
                         ]
                     },

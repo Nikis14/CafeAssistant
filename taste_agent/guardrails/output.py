@@ -25,8 +25,9 @@ students see the cost surface.
 Judge model resolution (see ``resolve_judge_model_id``):
   1. ``TASTE_AGENT_SKIP_OUTPUT_JUDGE=1`` → skip
   2. ``TASTE_AGENT_JUDGE_MODEL_ID=<litellm_id>`` → use that model
-  3. ``ANTHROPIC_API_KEY`` set → ``anthropic/claude-haiku-4-5`` (cheap, fast)
-  4. Otherwise → skip (no key for the default judge)
+  3. ``MISTRAL_API_KEY`` set → ``mistral/mistral-medium-3-5``
+  4. ``ANTHROPIC_API_KEY`` set → ``anthropic/claude-haiku-4-5`` (fallback)
+  5. Otherwise → skip (no key for the default judge)
 
 Per CLAUDE.md, we keep this hand-rolled rather than wrapping NeMo / Guardrails
 AI / LLM Guard so students see what those frameworks do under the hood.
@@ -53,8 +54,10 @@ logger = get_logger(__name__)
 # Env vars controlling judge behavior
 _JUDGE_SKIP_ENV = "TASTE_AGENT_SKIP_OUTPUT_JUDGE"
 _JUDGE_MODEL_ENV = "TASTE_AGENT_JUDGE_MODEL_ID"
-_DEFAULT_JUDGE_MODEL_ID = "anthropic/claude-haiku-4-5"
-_DEFAULT_JUDGE_KEY_ENV = "ANTHROPIC_API_KEY"
+_DEFAULT_JUDGE_MODEL_ID = "mistral/mistral-medium-3-5"
+_DEFAULT_JUDGE_KEY_ENV = "MISTRAL_API_KEY"
+_FALLBACK_JUDGE_MODEL_ID = "anthropic/claude-haiku-4-5"
+_FALLBACK_JUDGE_KEY_ENV = "ANTHROPIC_API_KEY"
 
 
 def resolve_judge_model_id() -> str | None:
@@ -71,9 +74,12 @@ def resolve_judge_model_id() -> str | None:
         return override
     if os.environ.get(_DEFAULT_JUDGE_KEY_ENV):
         return _DEFAULT_JUDGE_MODEL_ID
+    if os.environ.get(_FALLBACK_JUDGE_KEY_ENV):
+        return _FALLBACK_JUDGE_MODEL_ID
     logger.info(
-        "%s not set and no %s override; skipping output judge",
+        "%s / %s not set and no %s override; skipping output judge",
         _DEFAULT_JUDGE_KEY_ENV,
+        _FALLBACK_JUDGE_KEY_ENV,
         _JUDGE_MODEL_ENV,
     )
     return None
@@ -122,13 +128,18 @@ class OutputGuardrailResult:
     factuality_concerns: list[str] = field(default_factory=list)
     citation_ok: bool = True
     citation_concerns: list[str] = field(default_factory=list)
+    internal_error_rewritten: bool = False
+    internal_error_concerns: list[str] = field(default_factory=list)
     judge_skipped: bool = False
     judge_error: str | None = None
 
     @property
     def has_concerns(self) -> bool:
         return bool(
-            self.pii_concerns or self.factuality_concerns or self.citation_concerns
+            self.pii_concerns
+            or self.factuality_concerns
+            or self.citation_concerns
+            or self.internal_error_concerns
         )
 
     def summary_for_debug(self) -> dict[str, object]:
@@ -139,6 +150,8 @@ class OutputGuardrailResult:
             "factuality_concerns": self.factuality_concerns,
             "citation_ok": self.citation_ok,
             "citation_concerns": self.citation_concerns,
+            "internal_error_rewritten": self.internal_error_rewritten,
+            "internal_error_concerns": self.internal_error_concerns,
             "judge_skipped": self.judge_skipped,
             "judge_error": self.judge_error,
         }
@@ -172,6 +185,58 @@ def redact_output_pii(text: str) -> tuple[str, int, list[str]]:
         n_total += n
 
     return cleaned, n_total, concerns
+
+
+_INTERNAL_ERROR_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bTAVILY_API_KEY\b"), "env-var leak"),
+    (re.compile(r"\bANTHROPIC_API_KEY\b"), "env-var leak"),
+    (re.compile(r"\bMISTRAL_API_KEY\b"), "env-var leak"),
+    (re.compile(r"\bOPENAI_API_KEY\b"), "env-var leak"),
+    (re.compile(r"\bHTTP Error \d+\b", re.IGNORECASE), "provider http error leak"),
+    (re.compile(r"\bUnauthorized\b", re.IGNORECASE), "provider auth leak"),
+    (re.compile(r"\bupstream Places API\b", re.IGNORECASE), "upstream provider leak"),
+    (re.compile(r"\blive Places search\b", re.IGNORECASE), "internal search-path leak"),
+    (re.compile(r"\bauthorization error\b", re.IGNORECASE), "provider auth leak"),
+    (re.compile(r"\bprovider failure\b", re.IGNORECASE), "provider failure leak"),
+    (re.compile(r"\bAPI key\b", re.IGNORECASE), "api-key leak"),
+]
+
+
+def rewrite_internal_error_leaks(text: str) -> tuple[str, bool, list[str]]:
+    """Remove user-visible infrastructure/provider leakage from a reply.
+
+    The goal is not to hide substantive lack-of-data; it is to avoid surfacing
+    raw internal kitchen details like env vars, auth failures, and upstream
+    provider names. We drop contaminated sentences and keep the useful rest.
+    """
+    concerns: list[str] = []
+    hit = False
+
+    segments = re.split(r"(?<=[.!?])\s+|\n{2,}", text)
+    kept: list[str] = []
+    for segment in segments:
+        stripped = segment.strip()
+        if not stripped:
+            continue
+        segment_has_internal = False
+        for pattern, label in _INTERNAL_ERROR_PATTERNS:
+            if pattern.search(stripped):
+                concerns.append(label)
+                segment_has_internal = True
+                hit = True
+        if not segment_has_internal:
+            kept.append(stripped)
+
+    if not hit:
+        return text, False, []
+
+    cleaned = "\n\n".join(kept).strip()
+    if not cleaned:
+        cleaned = (
+            "I couldn’t confirm results from one of my search sources right now, "
+            "but I can still help with other available information."
+        )
+    return cleaned, True, sorted(set(concerns))
 
 
 # ── LLM judge for factuality + citation ──────────────────────────────────────
@@ -262,13 +327,18 @@ def run_output_guardrails(
             judge_model_id = env_model or _DEFAULT_JUDGE_MODEL_ID
 
     with trace("guardrail:output", skip_judge=skip_judge):
-        cleaned, n_pii, pii_concerns = redact_output_pii(response_text)
+        cleaned, internal_rewritten, internal_concerns = rewrite_internal_error_leaks(
+            response_text
+        )
+        cleaned, n_pii, pii_concerns = redact_output_pii(cleaned)
 
         if skip_judge or model_factory is None:
             return OutputGuardrailResult(
                 response_text=cleaned,
                 pii_leaked=n_pii,
                 pii_concerns=pii_concerns,
+                internal_error_rewritten=internal_rewritten,
+                internal_error_concerns=internal_concerns,
                 judge_skipped=True,
             )
 
@@ -278,6 +348,8 @@ def run_output_guardrails(
                 response_text=cleaned,
                 pii_leaked=n_pii,
                 pii_concerns=pii_concerns,
+                internal_error_rewritten=internal_rewritten,
+                internal_error_concerns=internal_concerns,
                 judge_skipped=False,
                 judge_error=err,
             )
@@ -290,5 +362,7 @@ def run_output_guardrails(
             factuality_concerns=list(payload.factuality_concerns),
             citation_ok=payload.citation_ok,
             citation_concerns=list(payload.citation_concerns),
+            internal_error_rewritten=internal_rewritten,
+            internal_error_concerns=internal_concerns,
             judge_skipped=False,
         )

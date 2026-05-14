@@ -48,6 +48,27 @@ def test_history_skips_empty_content():
     assert isinstance(msgs[0], AIMessage)
 
 
+def test_history_extracts_text_from_list_content_blocks():
+    history = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Please book the first one."},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "I need a date and time."},
+            ],
+        },
+    ]
+    msgs = _gradio_history_to_messages(history)
+    assert len(msgs) == 2
+    assert msgs[0].content == "Please book the first one."
+    assert msgs[1].content == "I need a date and time."
+
+
 def test_history_empty_list_returns_empty():
     assert _gradio_history_to_messages([]) == []
 
@@ -209,6 +230,19 @@ def test_title_for_skips_non_user_messages():
     assert _title_for(history) == "New chat"
 
 
+def test_title_for_handles_list_content_blocks():
+    from app import _title_for
+
+    history = [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "Please book the first one."}],
+        },
+        {"role": "assistant", "content": "OK"},
+    ]
+    assert _title_for(history) == "Please book the first one."
+
+
 def test_conv_choices_returns_reverse_insertion_order():
     """Most recent (last-inserted) conversation should appear first."""
     from app import _conv_choices
@@ -350,3 +384,36 @@ def test_send_message_isolates_conversations_in_state(monkeypatch):
     assert updated["convB"] == [{"role": "user", "content": "B1"}]
     # convA grew
     assert len(updated["convA"]) == 3
+
+
+def test_stage_user_message_appends_immediately():
+    from app import stage_user_message
+
+    chatbot, convs, active, _radio, cleared = stage_user_message(
+        "hello",
+        chat_history=[],
+        conversations={},
+        active_id=None,
+    )
+    assert active is not None
+    assert chatbot == [{"role": "user", "content": "hello"}]
+    assert convs[active] == chatbot
+    assert cleared == ""
+
+
+def test_complete_assistant_message_uses_last_user_turn(monkeypatch):
+    monkeypatch.setattr("app.chat_fn", lambda message, history, *_a, **_kw: f"reply:{message}:{len(history)}")
+
+    from app import complete_assistant_message
+
+    staged = [{"role": "user", "content": "hello"}]
+    chatbot, convs, active, _radio = complete_assistant_message(
+        staged,
+        {"conv1": staged},
+        "conv1",
+        "Claude Sonnet 4.6",
+        _FakeRequest("user-x"),
+    )
+    assert active == "conv1"
+    assert chatbot[-1] == {"role": "assistant", "content": "reply:hello:0"}
+    assert convs["conv1"] == chatbot

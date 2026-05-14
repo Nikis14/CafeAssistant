@@ -33,7 +33,20 @@ If the user is making a reservation, finding a place is a precursor — call thi
 
 ## Output shape
 
-A list of objects, each with: `name`, `address`, `reason` (short, mentions any preference match), and optional `review_snippet`.
+A list of objects, each with:
+
+- `name`
+- `address`
+- `reason` (short, mentions any preference match)
+- `review_snippet` (optional)
+- `website_url` (optional; grounded only when known)
+- `reservation_url` (optional; grounded only when known)
+- `phone` (optional)
+- `maps_url` (optional)
+- `source` (`mock`, `foursquare`, or `error`)
+- `status` (`ok`, `error`, or later richer states)
+
+For booking flows, prefer grounded `reservation_url` when present. Do not invent it.
 
 ## Phase status
 

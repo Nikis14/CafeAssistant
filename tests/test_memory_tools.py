@@ -23,9 +23,11 @@ def test_memory_read_returns_current_facts():
     assert result == {"dietary": "vegetarian", "city": "Belgrade"}
 
 
-def test_memory_search_returns_empty_when_no_events():
+def test_memory_search_returns_sentinel_when_no_events():
     result = memory_search.invoke({"query": "anything"})
-    assert result == []
+    assert len(result) == 1
+    assert result[0]["status"] == "no_results"
+    assert "No matching episodic memory" in result[0]["notes"]
 
 
 def test_memory_search_returns_logged_event_dicts():

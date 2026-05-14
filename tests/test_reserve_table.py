@@ -11,7 +11,8 @@ from __future__ import annotations
 import pytest
 
 from taste_agent.browser.backend import MockBrowserBackend
-from taste_agent.browser.parser_cache import has_trace, save_trace
+from taste_agent.browser.parser_cache import format_trace, has_trace, save_trace
+from taste_agent.config import DEFAULT_MODEL_ID
 from taste_agent.guardrails.action import (
     approve,
     get_pending,
@@ -129,6 +130,50 @@ def test_run_uses_cache_when_available():
     )
     assert result["source"] == "cached"
     assert result["status"] == "pending_approval"
+
+
+def test_run_rejects_homepage_url_before_subagent():
+    backend = MockBrowserBackend()
+    set_default_backend(backend)
+    result = run(
+        place_name="Sonder",
+        reservation_url="https://www.sonder.rs",
+        date="2026-05-20",
+        time="20:00",
+        party_size=2,
+        contact_name="Ana",
+    )
+    assert result["status"] == "failed"
+    assert result["source"] == "validation"
+    assert "homepage" in result["error"]
+    assert backend.calls == []
+
+
+def test_run_rejects_placeholder_contact_name():
+    backend = MockBrowserBackend()
+    set_default_backend(backend)
+    result = run(
+        place_name="Sonder",
+        reservation_url="https://www.sonder.rs/reservations",
+        date="2026-05-20",
+        time="20:00",
+        party_size=2,
+        contact_name="User",
+    )
+    assert result["status"] == "failed"
+    assert result["source"] == "validation"
+    assert "placeholder" in result["error"]
+    assert backend.calls == []
+
+
+def test_format_trace_renders_steps():
+    trace = [
+        ("navigate", {"url": "https://x.example/reserve"}),
+        ("fill", {"selector": "input#name", "value": "Ana"}),
+    ]
+    rendered = format_trace(trace)
+    assert "1. navigate(url='https://x.example/reserve')" in rendered
+    assert "2. fill(selector='input#name', value='Ana')" in rendered
 
 
 # ── finalize_reservation (the deterministic confirm-gate) ────────────────────
@@ -284,3 +329,25 @@ def test_run_impl_caches_trace_only_on_pending_outcome():
         model_factory=_factory,
     )
     assert has_trace(url) is False
+
+
+def test_run_impl_passes_real_model_id_to_subagent_factory():
+    seen: list[str] = []
+
+    def factory(model_id: str):
+        seen.append(model_id)
+        return FakeAgentModel(response="done")
+
+    backend = MockBrowserBackend()
+    _run_impl(
+        place_name="Iva",
+        reservation_url="https://model-id.example/reserve",
+        date="2026-05-20",
+        time="20:00",
+        party_size=2,
+        contact_name="Ana",
+        contact_phone="",
+        backend=backend,
+        model_factory=factory,
+    )
+    assert seen == [DEFAULT_MODEL_ID]

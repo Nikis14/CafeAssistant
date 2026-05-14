@@ -13,18 +13,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlparse
 
 from langchain_core.language_models import BaseChatModel
 
 from taste_agent.browser.backend import BrowserBackend, MockBrowserBackend
 from taste_agent.browser.parser_cache import (
     ActionTrace,
+    format_trace,
     get_trace,
     has_trace,
     host_of,
     save_trace,
 )
 from taste_agent.browser.sub_agent import run_browser_subagent
+from taste_agent.config import DEFAULT_MODEL_ID
 from taste_agent.guardrails.action import (
     consume,
     gate_action,
@@ -44,6 +47,14 @@ _DEFAULT_SUBMIT_SELECTOR = "button.confirm-reservation"
 _DEFAULT_BACKEND: BrowserBackend | None = None
 
 
+def _chat_model_kwargs(model_id: str) -> dict[str, Any]:
+    """Return LiteLLM kwargs that are compatible with the target model."""
+    normalized = model_id.lower()
+    if normalized.startswith("openai/gpt-5"):
+        return {}
+    return {"temperature": 0.2}
+
+
 def set_default_backend(backend: BrowserBackend) -> None:
     """Override the module-level backend used by ``run`` / ``finalize_reservation``."""
     global _DEFAULT_BACKEND
@@ -61,7 +72,7 @@ def _default_model_factory(model_id: str) -> BaseChatModel:
     """Same lazy-LiteLLM factory pattern as the main orchestrator."""
     from langchain_litellm import ChatLiteLLM
 
-    return ChatLiteLLM(model=model_id, temperature=0.2)
+    return ChatLiteLLM(model=model_id, **_chat_model_kwargs(model_id))
 
 
 def _format_goal(
@@ -100,6 +111,51 @@ def _format_summary(
         f"Reserve at {place_name} (via {host}): {date} {time}, party of {party_size}, "
         f"name {contact_name}{phone_part}"
     )
+
+
+_PLACEHOLDER_CONTACT_NAMES = {"user", "guest", "customer", "test", "unknown"}
+_RESERVATION_PATH_HINTS = (
+    "reserve",
+    "reservation",
+    "reservations",
+    "booking",
+    "book",
+    "table",
+    "rezerw",
+)
+
+
+def _validate_booking_inputs(
+    *,
+    reservation_url: str,
+    contact_name: str,
+) -> str | None:
+    """Reject obviously invented or unsafe booking inputs.
+
+    This is intentionally lightweight: it catches clear placeholders and
+    homepage URLs masquerading as reservation pages, while leaving the fuller
+    discovery architecture for a later step.
+    """
+    parsed = urlparse(reservation_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return "reservation_url must be a full grounded URL."
+
+    normalized_name = contact_name.strip().lower()
+    if normalized_name in _PLACEHOLDER_CONTACT_NAMES:
+        return "contact_name looks like a placeholder; ask the user for their real name."
+
+    path = (parsed.path or "").strip("/").lower()
+    if not path or path == "index.html":
+        return (
+            "reservation_url looks like a homepage, not a booking page. "
+            "Find a grounded reservation page before calling reserve_table."
+        )
+    if not any(hint in path for hint in _RESERVATION_PATH_HINTS):
+        return (
+            "reservation_url does not look like a reservation page. "
+            "Find a grounded booking URL before calling reserve_table."
+        )
+    return None
 
 
 _REPLAYABLE_ACTIONS = {"navigate", "click", "fill", "wait_for", "dom_snapshot"}
@@ -191,6 +247,7 @@ def _run_impl(
     contact_phone: str,
     backend: BrowserBackend,
     model_factory: Callable[[str], BaseChatModel],
+    model_id: str = DEFAULT_MODEL_ID,
 ) -> dict[str, Any]:
     with trace(
         "skill:reserve_table",
@@ -230,7 +287,12 @@ def _run_impl(
         )
 
         try:
-            result = run_browser_subagent(goal=goal, backend=backend, model_factory=model_factory)
+            result = run_browser_subagent(
+                goal=goal,
+                backend=backend,
+                model_factory=model_factory,
+                model_id=model_id,
+            )
         except Exception:
             # Sub-agent crashed — drop the forbid so the backend is reusable.
             backend.forbidden_selectors.discard(_DEFAULT_SUBMIT_SELECTOR)
@@ -252,6 +314,11 @@ def _run_impl(
             }
 
         actions = result.get("actions", [])
+        logger.info(
+            "browser recipe discovered for host=%s\n%s",
+            host_of(reservation_url),
+            format_trace(actions),
+        )
         save_trace(reservation_url, actions)
 
         return {
@@ -278,6 +345,14 @@ def run(
         Dict with ``status`` ("pending_approval" or "failed"). When pending,
         also includes ``action_id`` and ``summary`` for the user-approval flow.
     """
+    validation_error = _validate_booking_inputs(
+        reservation_url=reservation_url,
+        contact_name=contact_name,
+    )
+    if validation_error is not None:
+        logger.warning("reserve_table rejected ungrounded inputs: %s", validation_error)
+        return {"status": "failed", "error": validation_error, "source": "validation"}
+
     return _run_impl(
         place_name=place_name,
         reservation_url=reservation_url,
@@ -288,6 +363,7 @@ def run(
         contact_phone=contact_phone,
         backend=_get_default_backend(),
         model_factory=_default_model_factory,
+        model_id=DEFAULT_MODEL_ID,
     )
 
 

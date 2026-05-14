@@ -17,6 +17,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field, ValidationError
 
+from taste_agent.config import DEFAULT_MODEL_ID
 from taste_agent.logging_ import get_logger, trace
 from taste_agent.memory import (
     EpisodicMemory,
@@ -91,7 +92,7 @@ def derive_patterns(
     semantic: SemanticMemory | None = None,
     episodic: EpisodicMemory | None = None,
     model_factory: ModelFactory,
-    model_id: str = "anthropic/claude-haiku-4-5",
+    model_id: str = DEFAULT_MODEL_ID,
     max_events: int = 50,
 ) -> list[InferredPattern] | None:
     """Run the LLM derivation.
@@ -149,7 +150,7 @@ def maybe_derive_procedural(
     semantic: SemanticMemory | None = None,
     episodic: EpisodicMemory | None = None,
     procedural: ProceduralMemory | None = None,
-    model_id: str = "anthropic/claude-haiku-4-5",
+    model_id: str = DEFAULT_MODEL_ID,
     max_events: int = 50,
 ) -> bool:
     """Run derivation only when enough new episodes accumulated since last time.
