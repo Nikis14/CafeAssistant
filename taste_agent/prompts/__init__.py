@@ -18,6 +18,7 @@ Layout (this directory):
   __init__.py            (this module — loader + render helpers)
   orchestrator.txt       (the main agent's system prompt)
   browser_subagent.txt   (the reservation-flow sub-agent's system prompt)
+  browser_discovery.txt  (the discovery-flow browser sub-agent prompt)
   output_judge.txt       (the output guardrail's factuality / citation judge)
 
 All templates use f-string format (LangChain default). Literal curly braces
@@ -81,6 +82,33 @@ def _render_patterns(patterns_text: str | None) -> str:
     )
 
 
+def _render_booking_context(booking_values: dict[str, str] | None) -> str:
+    """Render known booking details already provided in this conversation."""
+    if not booking_values:
+        return ""
+    labels = {
+        "date": "Date",
+        "time": "Time",
+        "party_size": "Party size",
+        "contact_name": "Reservation name",
+        "contact_phone": "Contact phone",
+    }
+    ordered = ["date", "time", "party_size", "contact_name", "contact_phone"]
+    lines = "\n".join(
+        f"- {labels.get(key, key)}: {booking_values[key]}"
+        for key in ordered
+        if key in booking_values and booking_values[key]
+    )
+    if not lines:
+        return ""
+    return (
+        "\n\nKnown booking details already provided earlier in this conversation:\n"
+        f"{lines}\n"
+        "Reuse these details when continuing a reservation flow. Ask only for "
+        "the missing booking details."
+    )
+
+
 # ── Public render functions ──────────────────────────────────────────────────
 
 
@@ -89,6 +117,7 @@ def system_prompt(
     now: datetime | None = None,
     facts: dict[str, str] | None = None,
     patterns_text: str | None = None,
+    booking_values: dict[str, str] | None = None,
 ) -> str:
     """Render the orchestrator's system prompt for this turn.
 
@@ -107,12 +136,18 @@ def system_prompt(
         city=city,
         facts_section=_render_facts(facts),
         patterns_section=_render_patterns(patterns_text),
+        booking_context_section=_render_booking_context(booking_values),
     )
 
 
 def subagent_prompt() -> str:
     """Render the browser sub-agent's system prompt (no variables)."""
     return load_template("browser_subagent").format()
+
+
+def discovery_subagent_prompt() -> str:
+    """Render the browser discovery sub-agent prompt (no variables)."""
+    return load_template("browser_discovery").format()
 
 
 def output_judge_prompt(*, context: str, response: str) -> str:

@@ -12,6 +12,7 @@ orchestrator's job, gated by ``taste_agent.guardrails.action``.
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -26,7 +27,9 @@ from taste_agent.browser.parser_cache import (
     host_of,
     save_trace,
 )
-from taste_agent.browser.sub_agent import run_browser_subagent
+from taste_agent.browser.spec_cache import get_spec, save_spec
+from taste_agent.browser.specs import BookingFieldSpec, BookingFlowSpec, BookingFlowStep
+from taste_agent.browser.sub_agent import run_browser_discovery_subagent, run_browser_subagent
 from taste_agent.config import DEFAULT_MODEL_ID
 from taste_agent.guardrails.action import (
     consume,
@@ -160,6 +163,363 @@ def _validate_booking_inputs(
 
 _REPLAYABLE_ACTIONS = {"navigate", "click", "fill", "wait_for", "dom_snapshot"}
 
+_REQUIRED_FIELD_ORDER = ("date", "time", "party_size", "contact_name")
+_OPTIONAL_FIELDS = {"contact_phone"}
+_FIELD_REQUEST_LABELS = {
+    "date": "date (YYYY-MM-DD)",
+    "time": "time (HH:MM)",
+    "party_size": "party size",
+    "contact_name": "name for the reservation",
+    "contact_phone": "contact phone (optional)",
+}
+
+
+def _infer_platform(host: str) -> str:
+    lowered = host.lower()
+    if "resos" in lowered:
+        return "resos"
+    if "opentable" in lowered:
+        return "opentable"
+    if "sevenrooms" in lowered:
+        return "sevenrooms"
+    return "unknown"
+
+
+def _infer_field_from_selector(selector: str) -> tuple[str, str] | None:
+    lowered = selector.lower()
+    if "date" in lowered:
+        return ("date", "date")
+    if "time" in lowered:
+        return ("time", "time")
+    if "party" in lowered or "guest" in lowered or "people" in lowered:
+        return ("party_size", "integer")
+    if "phone" in lowered or "tel" in lowered:
+        return ("contact_phone", "phone")
+    if "name" in lowered:
+        return ("contact_name", "text")
+    return None
+
+
+def _infer_flow_spec(
+    *,
+    place_name: str,
+    reservation_url: str,
+    actions: ActionTrace,
+) -> BookingFlowSpec:
+    """Infer a first-cut flow spec from a successful pre-submit action trace.
+
+    This is an incremental bridge: the current browser sub-agent still emits a
+    raw trace, but we immediately normalize the learned structure into a spec
+    so later steps can shift from trace-replay to spec-driven preparation.
+    """
+    host = host_of(reservation_url)
+    first_fill_index = next(
+        (idx for idx, (action_name, _) in enumerate(actions) if action_name == "fill"),
+        len(actions),
+    )
+    steps_to_form = [
+        BookingFlowStep(action=action_name, args=dict(args))
+        for action_name, args in actions[:first_fill_index]
+    ]
+
+    fields_by_name: dict[str, BookingFieldSpec] = {}
+    final_form_url = reservation_url
+
+    for action_name, args in actions:
+        if action_name == "navigate":
+            url = str(args.get("url", "")).strip()
+            if url:
+                final_form_url = url
+        if action_name != "fill":
+            continue
+        selector = str(args.get("selector", "")).strip()
+        inferred = _infer_field_from_selector(selector)
+        if inferred is None:
+            continue
+        field_name, field_type = inferred
+        fields_by_name.setdefault(
+            field_name,
+            BookingFieldSpec(name=field_name, type=field_type, selector=selector),
+        )
+
+    required_fields = [
+        fields_by_name[name]
+        for name in _REQUIRED_FIELD_ORDER
+        if name in fields_by_name
+    ]
+    optional_fields = [
+        fields_by_name[name]
+        for name in sorted(_OPTIONAL_FIELDS)
+        if name in fields_by_name
+    ]
+
+    return BookingFlowSpec(
+        status="ok",
+        place_name=place_name,
+        source_host=host,
+        platform=_infer_platform(host),
+        entry_url=reservation_url,
+        final_form_url=final_form_url,
+        steps_to_form=steps_to_form,
+        required_fields=required_fields,
+        optional_fields=optional_fields,
+        submit_selector=_DEFAULT_SUBMIT_SELECTOR,
+        confidence=0.8 if required_fields else 0.5,
+        notes="Inferred from a successful pre-submit browser action trace.",
+    )
+
+
+def _infer_fields_from_dom(dom: str) -> list[BookingFieldSpec]:
+    fields_by_name: dict[str, BookingFieldSpec] = {}
+    selector_patterns = [
+        r"""(?:input|select|textarea)[^>]*name=['"]([^'"]+)['"]""",
+        r"""(?:input|select|textarea)[^>]*id=['"]([^'"]+)['"]""",
+    ]
+    for pattern in selector_patterns:
+        for match in re.finditer(pattern, dom, flags=re.IGNORECASE):
+            attr_value = match.group(1)
+            selector = f"""input[name='{attr_value}']"""
+            inferred = _infer_field_from_selector(attr_value)
+            if inferred is None:
+                inferred = _infer_field_from_selector(selector)
+            if inferred is None:
+                continue
+            field_name, field_type = inferred
+            fields_by_name.setdefault(
+                field_name,
+                BookingFieldSpec(name=field_name, type=field_type, selector=selector),
+            )
+    return [fields_by_name[name] for name in _REQUIRED_FIELD_ORDER if name in fields_by_name] + [
+        fields_by_name[name] for name in sorted(_OPTIONAL_FIELDS) if name in fields_by_name
+    ]
+
+
+def _spec_from_discovery(
+    *,
+    place_name: str,
+    reservation_url: str,
+    actions: ActionTrace,
+    final_url: str,
+    final_dom: str,
+) -> BookingFlowSpec:
+    required_and_optional = _infer_fields_from_dom(final_dom)
+    required_fields = [
+        field for field in required_and_optional if field.name in _REQUIRED_FIELD_ORDER
+    ]
+    optional_fields = [
+        field for field in required_and_optional if field.name in _OPTIONAL_FIELDS
+    ]
+    return BookingFlowSpec(
+        status="ok" if required_fields else "no_online_booking",
+        place_name=place_name,
+        source_host=host_of(final_url or reservation_url),
+        platform=_infer_platform(host_of(final_url or reservation_url)),
+        entry_url=reservation_url,
+        final_form_url=final_url or reservation_url,
+        steps_to_form=[BookingFlowStep(action=name, args=dict(args)) for name, args in actions],
+        required_fields=required_fields,
+        optional_fields=optional_fields,
+        submit_selector=_DEFAULT_SUBMIT_SELECTOR if required_fields else None,
+        confidence=0.7 if required_fields else 0.3,
+        notes="Inferred from browser discovery before user value collection.",
+    )
+
+
+def _booking_values(
+    *,
+    date: str,
+    time: str,
+    party_size: int,
+    contact_name: str,
+    contact_phone: str,
+) -> dict[str, str]:
+    return {
+        "date": date,
+        "time": time,
+        "party_size": str(party_size),
+        "contact_name": contact_name,
+        "contact_phone": contact_phone,
+    }
+
+
+def _field_request_label(field_name: str) -> str:
+    return _FIELD_REQUEST_LABELS.get(field_name, field_name.replace("_", " "))
+
+
+def _build_discovery_payload(
+    *,
+    flow_spec: BookingFlowSpec,
+    source: str,
+    message: str = "",
+) -> dict[str, Any]:
+    required_names = [field.name for field in flow_spec.required_fields]
+    optional_names = [field.name for field in flow_spec.optional_fields]
+    required_prompts = [_field_request_label(name) for name in required_names]
+    optional_prompts = [_field_request_label(name) for name in optional_names]
+
+    next_step = ""
+    if flow_spec.status == "ok" and required_prompts:
+        next_step = "Ask the user only for any missing required details from this list: "
+        next_step += ", ".join(required_prompts)
+        if optional_prompts:
+            next_step += ". Optionally ask for " + ", ".join(optional_prompts) + "."
+        else:
+            next_step += "."
+    elif flow_spec.status != "ok":
+        next_step = (
+            "No reliable online booking form was discovered. Offer to keep looking "
+            "or suggest another place with a booking page."
+        )
+
+    payload: dict[str, Any] = {
+        "status": "ok" if flow_spec.status == "ok" else flow_spec.status,
+        "source": source,
+        "flow_spec": flow_spec.model_dump(),
+        "required_fields": required_names,
+        "optional_fields": optional_names,
+        "required_field_prompts": required_prompts,
+        "optional_field_prompts": optional_prompts,
+        "requirements_summary": ", ".join(required_prompts) if required_prompts else "",
+        "next_step": next_step,
+    }
+    if message:
+        payload["message"] = message
+    return payload
+
+
+def _discovery_goal(*, place_name: str, reservation_url: str) -> str:
+    return (
+        f"Discover the online reservation flow for {place_name}. Start from "
+        f"{reservation_url}. Find the booking form and determine which fields "
+        "are required before any user-specific values are entered. Do not fill "
+        "or submit anything."
+    )
+
+
+def _prepare_from_spec(
+    *,
+    flow_spec: BookingFlowSpec,
+    backend: BrowserBackend,
+    place_name: str,
+    reservation_url: str,
+    date: str,
+    time: str,
+    party_size: int,
+    contact_name: str,
+    contact_phone: str,
+) -> dict[str, Any]:
+    """Instantiate a discovered booking flow with current user values.
+
+    This is the first real split between discovery and preparation. The spec
+    tells us how to reach the form and which selectors to fill; the current
+    user-provided values are injected here, not copied from an old trace.
+    """
+    with trace(
+        "skill:reserve_table:prepare_from_spec",
+        n_steps=len(flow_spec.steps_to_form),
+        n_required=len(flow_spec.required_fields),
+    ):
+        for step in flow_spec.steps_to_form:
+            action_name = step.action
+            args = step.args
+            if action_name not in _REPLAYABLE_ACTIONS:
+                logger.error(
+                    "unknown cached spec step %r for %s — refusing to prepare",
+                    action_name,
+                    reservation_url,
+                )
+                return {
+                    "status": "failed",
+                    "error": f"cached flow spec contains unknown action {action_name!r}; "
+                    "cache may be stale — rediscover the booking flow",
+                }
+            if action_name == "navigate":
+                backend.navigate(str(args.get("url", "")))
+            elif action_name == "click":
+                backend.click(str(args.get("selector", "")))
+            elif action_name == "wait_for":
+                timeout_ms = args.get("timeout_ms", 5000)
+                backend.wait_for(
+                    str(args.get("selector", "")),
+                    timeout_ms=int(timeout_ms) if isinstance(timeout_ms, int) else 5000,
+                )
+            elif action_name == "dom_snapshot":
+                backend.dom_snapshot(args.get("selector"))  # type: ignore[arg-type]
+            elif action_name == "fill":
+                backend.fill(str(args.get("selector", "")), str(args.get("value", "")))
+
+        values = _booking_values(
+            date=date,
+            time=time,
+            party_size=party_size,
+            contact_name=contact_name,
+            contact_phone=contact_phone,
+        )
+        for field in flow_spec.required_fields:
+            backend.fill(field.selector, values[field.name])
+        for field in flow_spec.optional_fields:
+            value = values.get(field.name, "")
+            if value:
+                backend.fill(field.selector, value)
+
+        summary = _format_summary(
+            place_name=place_name,
+            reservation_url=reservation_url,
+            date=date,
+            time=time,
+            party_size=party_size,
+            contact_name=contact_name,
+            contact_phone=contact_phone,
+        )
+        action_id = register_pending(
+            tool_name="confirm_reservation",
+            summary=summary,
+            args={
+                "source": "spec",
+                "submit_selector": flow_spec.submit_selector or _DEFAULT_SUBMIT_SELECTOR,
+            },
+        )
+        return {
+            "status": "pending_approval",
+            "action_id": action_id,
+            "summary": summary,
+            "source": "spec",
+            "flow_spec": flow_spec.model_dump(),
+        }
+
+
+def _discover_impl(
+    *,
+    place_name: str,
+    reservation_url: str,
+    backend: BrowserBackend,
+    model_factory: Callable[[str], BaseChatModel],
+    model_id: str = DEFAULT_MODEL_ID,
+) -> dict[str, Any]:
+    cached_spec = get_spec(reservation_url)
+    if cached_spec is not None:
+        return _build_discovery_payload(flow_spec=cached_spec, source="cached_spec")
+
+    result = run_browser_discovery_subagent(
+        goal=_discovery_goal(place_name=place_name, reservation_url=reservation_url),
+        backend=backend,
+        model_factory=model_factory,
+        model_id=model_id,
+    )
+    flow_spec = _spec_from_discovery(
+        place_name=place_name,
+        reservation_url=reservation_url,
+        actions=result.get("actions", []),
+        final_url=str(result.get("final_url", reservation_url)),
+        final_dom=str(result.get("final_dom", "")),
+    )
+    save_spec(reservation_url, flow_spec)
+    return _build_discovery_payload(
+        flow_spec=flow_spec,
+        source="discovery",
+        message=result.get("last_message_text", ""),
+    )
+
 
 def _replay_cached(
     *,
@@ -228,11 +588,13 @@ def _replay_cached(
             summary=summary,
             args={"source": "cached", "submit_selector": _DEFAULT_SUBMIT_SELECTOR},
         )
+        cached_spec = get_spec(reservation_url)
         return {
             "status": "pending_approval",
             "action_id": action_id,
             "summary": summary,
             "source": "cached",
+            "flow_spec": cached_spec.model_dump() if cached_spec else None,
         }
 
 
@@ -261,6 +623,20 @@ def _run_impl(
         # The forbid is lifted only by ``finalize_reservation`` (after the
         # deterministic gate passes) or ``cancel_reservation``.
         backend.forbidden_selectors.add(_DEFAULT_SUBMIT_SELECTOR)
+
+        cached_spec = get_spec(reservation_url)
+        if cached_spec is not None and cached_spec.status == "ok":
+            return _prepare_from_spec(
+                flow_spec=cached_spec,
+                backend=backend,
+                place_name=place_name,
+                reservation_url=reservation_url,
+                date=date,
+                time=time,
+                party_size=party_size,
+                contact_name=contact_name,
+                contact_phone=contact_phone,
+            )
 
         cached = get_trace(reservation_url)
         if cached is not None:
@@ -320,6 +696,12 @@ def _run_impl(
             format_trace(actions),
         )
         save_trace(reservation_url, actions)
+        flow_spec = _infer_flow_spec(
+            place_name=place_name,
+            reservation_url=reservation_url,
+            actions=actions,
+        )
+        save_spec(reservation_url, flow_spec)
 
         return {
             "status": "pending_approval",
@@ -327,6 +709,7 @@ def _run_impl(
             "summary": pending_after.summary,
             "source": "agentic",
             "n_actions": len(actions),
+            "flow_spec": flow_spec.model_dump(),
         }
 
 
@@ -361,6 +744,28 @@ def run(
         party_size=party_size,
         contact_name=contact_name,
         contact_phone=contact_phone,
+        backend=_get_default_backend(),
+        model_factory=_default_model_factory,
+        model_id=DEFAULT_MODEL_ID,
+    )
+
+
+def discover_booking_flow(
+    place_name: str,
+    reservation_url: str,
+) -> dict[str, Any]:
+    """Explore a booking page and cache a reusable booking flow spec."""
+    validation_error = _validate_booking_inputs(
+        reservation_url=reservation_url,
+        contact_name="DiscoveryUser",
+    )
+    if validation_error is not None and "placeholder" not in validation_error:
+        logger.warning("discover_booking_flow rejected ungrounded URL: %s", validation_error)
+        return {"status": "failed", "error": validation_error, "source": "validation"}
+
+    return _discover_impl(
+        place_name=place_name,
+        reservation_url=reservation_url,
         backend=_get_default_backend(),
         model_factory=_default_model_factory,
         model_id=DEFAULT_MODEL_ID,

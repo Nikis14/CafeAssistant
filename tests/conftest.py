@@ -85,11 +85,13 @@ def _reset_phase2_state():
     clean slate or they leak state across each other.
     """
     from taste_agent.browser.parser_cache import clear_cache
+    from taste_agent.browser.spec_cache import clear_spec_cache
     from taste_agent.guardrails import reset_action_state
     from taste_agent.skills.reserve_table import reserve_table as rt
 
     reset_action_state()
     clear_cache()
+    clear_spec_cache()
     # Drop any backend set by a prior test
     rt._DEFAULT_BACKEND = None
 
@@ -97,6 +99,7 @@ def _reset_phase2_state():
 
     reset_action_state()
     clear_cache()
+    clear_spec_cache()
     rt._DEFAULT_BACKEND = None
 
 

@@ -22,7 +22,7 @@ from taste_agent.browser.backend import BrowserBackend
 from taste_agent.config import DEFAULT_MODEL_ID
 from taste_agent.browser.tools import build_browser_tools, make_request_approval_tool
 from taste_agent.logging_ import get_logger, trace
-from taste_agent.prompts import subagent_prompt
+from taste_agent.prompts import discovery_subagent_prompt, subagent_prompt
 
 logger = get_logger(__name__)
 
@@ -57,6 +57,7 @@ def run_browser_subagent(
 
     llm = model_factory(model_id)
     agent = create_agent(llm, tools)
+    calls_before = len(getattr(backend, "calls", []))
 
     with trace("sub_agent:browser", goal=goal[:80]):
         result = agent.invoke(
@@ -85,11 +86,80 @@ def run_browser_subagent(
     else:
         text = str(last_content)
 
-    actions = getattr(backend, "calls", [])
-    logger.info("sub-agent finished: %d messages, %d backend actions", len(messages), len(actions))
+    all_calls = getattr(backend, "calls", [])
+    actions = list(all_calls[calls_before:])
+    logger.info(
+        "sub-agent finished: %d messages, %d backend actions",
+        len(messages),
+        len(actions),
+    )
 
     return {
         "messages": messages,
         "last_message_text": text,
-        "actions": list(actions),
+        "actions": actions,
+    }
+
+
+def run_browser_discovery_subagent(
+    goal: str,
+    backend: BrowserBackend,
+    model_factory: Callable[[str], BaseChatModel],
+    model_id: str = DEFAULT_MODEL_ID,
+) -> dict[str, Any]:
+    """Run a browser sub-agent in discovery mode.
+
+    Unlike ``run_browser_subagent``, this mode never gets a fill or approval
+    tool. It is used to learn how to reach the booking form and what the page
+    looks like before user-specific reservation values are collected.
+    """
+    tools = build_browser_tools(backend)
+
+    from langchain.agents import create_agent
+
+    llm = model_factory(model_id)
+    agent = create_agent(llm, tools)
+    calls_before = len(getattr(backend, "calls", []))
+
+    with trace("sub_agent:browser_discovery", goal=goal[:80]):
+        result = agent.invoke(
+            {
+                "messages": [
+                    SystemMessage(content=discovery_subagent_prompt()),
+                    HumanMessage(content=goal),
+                ]
+            }
+        )
+
+    messages = result["messages"]
+    last = messages[-1]
+    last_content = last.content
+    if isinstance(last_content, str):
+        text = last_content
+    elif isinstance(last_content, list):
+        parts: list[str] = []
+        for part in last_content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text", ""))
+            elif isinstance(part, str):
+                parts.append(part)
+        text = "".join(parts)
+    else:
+        text = str(last_content)
+
+    all_calls = getattr(backend, "calls", [])
+    actions = list(all_calls[calls_before:])
+    final_url = backend.current_url()
+    final_dom = backend.dom_snapshot("body")
+    logger.info(
+        "discovery sub-agent finished: %d messages, %d backend actions",
+        len(messages),
+        len(actions),
+    )
+    return {
+        "messages": messages,
+        "last_message_text": text,
+        "actions": actions,
+        "final_url": final_url,
+        "final_dom": final_dom,
     }

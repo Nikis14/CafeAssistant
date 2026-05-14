@@ -12,6 +12,9 @@ import pytest
 
 from taste_agent.browser.backend import MockBrowserBackend
 from taste_agent.browser.parser_cache import format_trace, has_trace, save_trace
+from taste_agent.browser.spec_cache import get_spec, save_spec
+from taste_agent.browser.specs import BookingFieldSpec, BookingFlowSpec, BookingFlowStep
+from taste_agent.browser.sub_agent import run_browser_subagent
 from taste_agent.config import DEFAULT_MODEL_ID
 from taste_agent.guardrails.action import (
     approve,
@@ -19,6 +22,7 @@ from taste_agent.guardrails.action import (
     register_pending,
 )
 from taste_agent.skills.reserve_table.reserve_table import (
+    _prepare_from_spec,
     _replay_cached,
     _run_impl,
     cancel_reservation,
@@ -130,6 +134,117 @@ def test_run_uses_cache_when_available():
     )
     assert result["source"] == "cached"
     assert result["status"] == "pending_approval"
+
+
+def test_prepare_from_spec_fills_current_values():
+    backend = MockBrowserBackend()
+    spec = BookingFlowSpec(
+        status="ok",
+        place_name="June Cafe",
+        source_host="june-cafe.resos.com",
+        platform="resos",
+        entry_url="https://june-cafe.resos.com/booking",
+        final_form_url="https://june-cafe.resos.com/booking",
+        steps_to_form=[
+            BookingFlowStep(
+                action="navigate",
+                args={"url": "https://june-cafe.resos.com/booking"},
+            ),
+            BookingFlowStep(action="dom_snapshot", args={"selector": "body"}),
+        ],
+        required_fields=[
+            BookingFieldSpec(name="date", type="date", selector="input[name='date']"),
+            BookingFieldSpec(name="time", type="time", selector="input[name='time']"),
+            BookingFieldSpec(
+                name="party_size",
+                type="integer",
+                selector="input[name='party_size']",
+            ),
+            BookingFieldSpec(name="contact_name", type="text", selector="input[name='name']"),
+        ],
+        optional_fields=[
+            BookingFieldSpec(
+                name="contact_phone",
+                type="phone",
+                selector="input[name='phone']",
+            )
+        ],
+    )
+    result = _prepare_from_spec(
+        flow_spec=spec,
+        backend=backend,
+        place_name="June Cafe",
+        reservation_url="https://june-cafe.resos.com/booking",
+        date="2026-05-20",
+        time="20:00",
+        party_size=2,
+        contact_name="Ana",
+        contact_phone="+381601234567",
+    )
+    assert result["status"] == "pending_approval"
+    assert result["source"] == "spec"
+    assert backend.calls == [
+        ("navigate", {"url": "https://june-cafe.resos.com/booking"}),
+        ("dom_snapshot", {"selector": "body"}),
+        ("fill", {"selector": "input[name='date']", "value": "2026-05-20"}),
+        ("fill", {"selector": "input[name='time']", "value": "20:00"}),
+        ("fill", {"selector": "input[name='party_size']", "value": "2"}),
+        ("fill", {"selector": "input[name='name']", "value": "Ana"}),
+        ("fill", {"selector": "input[name='phone']", "value": "+381601234567"}),
+    ]
+
+
+def test_run_prefers_spec_cache_over_raw_trace():
+    backend = MockBrowserBackend()
+    set_default_backend(backend)
+    url = "https://june-cafe.resos.com/booking"
+    save_trace(
+        url,
+        [
+            ("navigate", {"url": url}),
+            ("fill", {"selector": "input[name='name']", "value": "OLD"}),
+        ],
+    )
+    save_spec(
+        url,
+        BookingFlowSpec(
+            status="ok",
+            place_name="June Cafe",
+            source_host="june-cafe.resos.com",
+            platform="resos",
+            entry_url=url,
+            final_form_url=url,
+            steps_to_form=[BookingFlowStep(action="navigate", args={"url": url})],
+            required_fields=[
+                BookingFieldSpec(name="date", type="date", selector="input[name='date']"),
+                BookingFieldSpec(name="time", type="time", selector="input[name='time']"),
+                BookingFieldSpec(
+                    name="party_size",
+                    type="integer",
+                    selector="input[name='party_size']",
+                ),
+                BookingFieldSpec(
+                    name="contact_name",
+                    type="text",
+                    selector="input[name='name']",
+                ),
+            ],
+        ),
+    )
+
+    result = run(
+        place_name="June Cafe",
+        reservation_url=url,
+        date="2026-05-20",
+        time="20:00",
+        party_size=2,
+        contact_name="Ana",
+    )
+
+    assert result["status"] == "pending_approval"
+    assert result["source"] == "spec"
+    assert ("fill", {"selector": "input[name='name']", "value": "Ana"}) in backend.calls
+    assert ("fill", {"selector": "input[name='name']", "value": "OLD"}) not in backend.calls
 
 
 def test_run_rejects_homepage_url_before_subagent():
@@ -329,6 +444,57 @@ def test_run_impl_caches_trace_only_on_pending_outcome():
         model_factory=_factory,
     )
     assert has_trace(url) is False
+    assert get_spec(url) is None
+
+
+def test_run_impl_saves_flow_spec_on_pending_outcome(monkeypatch):
+    backend = MockBrowserBackend()
+    url = "https://june-cafe.resos.com/booking"
+
+    def _fake_run_browser_subagent(**_kwargs):
+        backend.navigate(url)
+        backend.dom_snapshot("body")
+        backend.fill("input[name='date']", "2026-05-20")
+        backend.fill("input[name='time']", "20:00")
+        backend.fill("input[name='party_size']", "2")
+        backend.fill("input[name='name']", "Ana")
+        action_id = register_pending("confirm_reservation", "Reserve at June Cafe")
+        return {
+            "messages": [],
+            "last_message_text": "done",
+            "actions": list(backend.calls),
+            "action_id": action_id,
+        }
+
+    monkeypatch.setattr(
+        "taste_agent.skills.reserve_table.reserve_table.run_browser_subagent",
+        _fake_run_browser_subagent,
+    )
+
+    result = _run_impl(
+        place_name="June Cafe",
+        reservation_url=url,
+        date="2026-05-20",
+        time="20:00",
+        party_size=2,
+        contact_name="Ana",
+        contact_phone="",
+        backend=backend,
+        model_factory=_factory,
+    )
+
+    assert result["status"] == "pending_approval"
+    assert result["source"] == "agentic"
+    spec = get_spec(url)
+    assert spec is not None
+    assert spec.platform == "resos"
+    assert [field.name for field in spec.required_fields] == [
+        "date",
+        "time",
+        "party_size",
+        "contact_name",
+    ]
+    assert result["flow_spec"]["place_name"] == "June Cafe"
 
 
 def test_run_impl_passes_real_model_id_to_subagent_factory():
@@ -351,3 +517,30 @@ def test_run_impl_passes_real_model_id_to_subagent_factory():
         model_factory=factory,
     )
     assert seen == [DEFAULT_MODEL_ID]
+
+
+def test_run_browser_subagent_returns_only_actions_from_current_run(monkeypatch):
+    from langchain_core.messages import AIMessage
+
+    backend = MockBrowserBackend()
+    backend.navigate("https://old.example/reserve")  # pre-existing history
+
+    class _FakeAgent:
+        def invoke(self, payload):
+            backend.navigate("https://new.example/reserve")
+            backend.fill("input#name", "Ana")
+            return {"messages": [AIMessage(content="done")]}
+
+    monkeypatch.setattr("langchain.agents.create_agent", lambda *_a, **_kw: _FakeAgent())
+
+    result = run_browser_subagent(
+        goal="discover booking flow",
+        backend=backend,
+        model_factory=_factory,
+        model_id=DEFAULT_MODEL_ID,
+    )
+
+    assert result["actions"] == [
+        ("navigate", {"url": "https://new.example/reserve"}),
+        ("fill", {"selector": "input#name", "value": "Ana"}),
+    ]

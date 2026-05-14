@@ -30,6 +30,7 @@ pytest tests/ -v
 ```
 
 See `CLAUDE.md` for project conventions (logging, testing, style).
+See `docs/booking_flow_redesign.md` for the current reservation-flow architecture notes.
 
 ## Phase status
 

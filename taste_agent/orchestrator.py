@@ -31,7 +31,10 @@ branch can finalize anything.
 
 from __future__ import annotations
 from collections.abc import Callable
+from datetime import datetime, timedelta
+import re
 from typing import Any, Literal, TypedDict
+from zoneinfo import ZoneInfo
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -41,7 +44,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from taste_agent.config import DEFAULT_MODEL_ID, SKILLS_DIR
+from taste_agent.config import DEFAULT_MODEL_ID, DEFAULT_TIMEZONE, SKILLS_DIR
 from taste_agent.guardrails import (
     GuardrailResult,
     OutputGuardrailResult,
@@ -67,6 +70,7 @@ from taste_agent.skills.reserve_table.reserve_table import (
     finalize_reservation,
 )
 from taste_agent.tools import (
+    discover_booking_flow,
     geocode,
     memory_read,
     memory_search,
@@ -167,6 +171,7 @@ def _get_agent_parts(
         logger.info("building agent parts for model=%s", model_id)
         skills = load_all_skills(SKILLS_DIR)
         tools = [
+            discover_booking_flow,
             geocode,
             memory_read,
             memory_search,
@@ -340,6 +345,109 @@ def _extract_text(message: BaseMessage) -> str:
     return str(content)
 
 
+_NUMBER_WORDS: dict[str, int] = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+_PHONE_RE = re.compile(r"\+?\d[\d\s().-]{6,}\d")
+_ISO_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+_TIME_RE = re.compile(
+    r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.|o'clock)?\b",
+    flags=re.IGNORECASE,
+)
+_PARTY_PATTERNS = (
+    re.compile(r"\bfor\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b", re.I),
+    re.compile(
+        r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:people|persons|guests)\b",
+        re.I,
+    ),
+    re.compile(r"\bparty of\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b", re.I),
+)
+_NAME_PATTERNS = (
+    re.compile(r"\bname is ([A-Z][a-zA-Z'-]+)\b"),
+    re.compile(r"\bunder the name ([A-Z][a-zA-Z'-]+)\b"),
+    re.compile(r"\bthere will be ([A-Z][a-zA-Z'-]+)\b"),
+    re.compile(r"\b(?:it will be|it is|it's)\s+([A-Z][a-zA-Z'-]+)\b"),
+)
+
+
+def _normalize_party_size(value: str) -> str | None:
+    lowered = value.lower()
+    if lowered.isdigit():
+        return lowered
+    n = _NUMBER_WORDS.get(lowered)
+    return str(n) if n is not None else None
+
+
+def _normalize_time(hour: int, minute: int, suffix: str | None) -> str:
+    normalized_suffix = (suffix or "").lower().replace(".", "")
+    if normalized_suffix == "pm" and hour < 12:
+        hour += 12
+    if normalized_suffix == "am" and hour == 12:
+        hour = 0
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _extract_known_booking_values(
+    history: list[BaseMessage],
+    *,
+    tz: str = DEFAULT_TIMEZONE,
+    now: datetime | None = None,
+) -> dict[str, str]:
+    """Extract booking values previously supplied by the user in this conversation."""
+    current = now if now is not None else datetime.now(ZoneInfo(tz))
+    known: dict[str, str] = {}
+    for message in history:
+        if not isinstance(message, HumanMessage):
+            continue
+        text = _extract_text(message)
+        if not text:
+            continue
+
+        iso_match = _ISO_DATE_RE.search(text)
+        lowered = text.lower()
+        if iso_match:
+            known["date"] = iso_match.group(1)
+        elif "tomorrow" in lowered:
+            known["date"] = (current + timedelta(days=1)).date().isoformat()
+        elif "today" in lowered:
+            known["date"] = current.date().isoformat()
+
+        for pattern in _PARTY_PATTERNS:
+            party_match = pattern.search(text)
+            if party_match:
+                normalized = _normalize_party_size(party_match.group(1))
+                if normalized is not None:
+                    known["party_size"] = normalized
+                    break
+
+        if ":" in text or "o'clock" in lowered or " am" in lowered or " pm" in lowered or " at " in lowered:
+            time_match = _TIME_RE.search(text)
+            if time_match:
+                hour = int(time_match.group(1))
+                minute = int(time_match.group(2) or "0")
+                known["time"] = _normalize_time(hour, minute, time_match.group(3))
+
+        for pattern in _NAME_PATTERNS:
+            name_match = pattern.search(text)
+            if name_match:
+                known["contact_name"] = name_match.group(1)
+                break
+
+        phone_match = _PHONE_RE.search(text)
+        if phone_match:
+            known["contact_phone"] = phone_match.group(0).strip()
+    return known
+
+
 # ── State graph ──────────────────────────────────────────────────────────────
 
 
@@ -368,6 +476,7 @@ class OrchestratorState(TypedDict, total=False):
     # ── Set by agent_node ──
     facts: dict[str, str]
     patterns_text: str
+    booking_values: dict[str, str]
     agent_messages: list[BaseMessage]
 
     # ── Set by output_guardrail_node ──
@@ -488,7 +597,12 @@ def agent_node(state: OrchestratorState) -> dict[str, Any]:
     """
     facts = get_default_semantic().as_dict()
     patterns_text = get_default_procedural().as_text()
-    sys_prompt_text = system_prompt(facts=facts, patterns_text=patterns_text)
+    booking_values = _extract_known_booking_values(state["history"])
+    sys_prompt_text = system_prompt(
+        facts=facts,
+        patterns_text=patterns_text,
+        booking_values=booking_values,
+    )
 
     agent = build_agent(
         state["model_id"],
@@ -512,6 +626,7 @@ def agent_node(state: OrchestratorState) -> dict[str, Any]:
     return {
         "facts": facts,
         "patterns_text": patterns_text,
+        "booking_values": booking_values,
         "agent_messages": all_msgs,
         "response_text": response_text,
     }
@@ -613,6 +728,7 @@ def format_agent_response_node(state: OrchestratorState) -> dict[str, Any]:
             "n_messages": len(all_msgs),
             "n_facts_in_prompt": len(facts),
             "patterns_in_prompt": bool(state.get("patterns_text")),
+            "known_booking_values": state.get("booking_values") or {},
             "output_guard": out_guard.summary_for_debug(),
             "procedural_derived": bool(state.get("procedural_derived")),
         }

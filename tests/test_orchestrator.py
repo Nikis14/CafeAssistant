@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from taste_agent.orchestrator import (
     _build_output_context,
     _chat_model_kwargs,
     _count_tool_calls,
+    _extract_known_booking_values,
     _extract_text,
     _format_output_note,
     _get_agent_parts,
@@ -214,6 +217,34 @@ def test_chat_model_kwargs_omit_temperature_for_gpt5():
     assert _chat_model_kwargs("openai/gpt-5") == {}
     assert _chat_model_kwargs("openai/gpt-5-mini") == {}
     assert _chat_model_kwargs("mistral/mistral-small-latest") == {"temperature": 0.2}
+
+
+def test_extract_known_booking_values_accumulates_prior_user_details():
+    history = [
+        HumanMessage(content="Please book it for tomorrow at 12 o'clock."),
+        HumanMessage(content="There will be two people."),
+        HumanMessage(content="The name is Nick."),
+    ]
+    values = _extract_known_booking_values(
+        history,
+        now=datetime(2026, 5, 14, 14, 0),
+    )
+    assert values["date"] == "2026-05-15"
+    assert values["time"] == "12:00"
+    assert values["party_size"] == "2"
+    assert values["contact_name"] == "Nick"
+
+
+def test_extract_known_booking_values_keeps_latest_override():
+    history = [
+        HumanMessage(content="Book for two people tomorrow."),
+        HumanMessage(content="Actually make it three people."),
+    ]
+    values = _extract_known_booking_values(
+        history,
+        now=datetime(2026, 5, 14, 14, 0),
+    )
+    assert values["party_size"] == "3"
 
 
 def test_format_note_suppresses_factuality_when_ok_flag_true():
