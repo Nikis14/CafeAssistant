@@ -44,12 +44,10 @@ The main agent receives:
 
 ```bash
 cd production_system
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
 cp .env.example .env
-python app.py
+uv sync --extra dev
+uv run playwright install chromium
+uv run python app.py
 ```
 
 Open `http://127.0.0.1:7860`.
@@ -59,7 +57,7 @@ Set at least one model provider key in `.env`. For reservation automation, Playw
 ## Development
 
 ```bash
-pytest tests/ -q
-ruff check .
-ruff format .
+uv run pytest tests/ -q
+uv run ruff check .
+uv run ruff format .
 ```
