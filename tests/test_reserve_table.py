@@ -14,7 +14,8 @@ from taste_agent.browser.backend import MockBrowserBackend
 from taste_agent.browser.parser_cache import format_trace, has_trace, save_trace
 from taste_agent.browser.spec_cache import get_spec, save_spec
 from taste_agent.browser.specs import BookingFieldSpec, BookingFlowSpec, BookingFlowStep
-from taste_agent.browser.sub_agent import run_browser_subagent
+from taste_agent.browser.sub_agent import _trim_old_html_tool_messages, run_browser_subagent
+from taste_agent.browser.sub_agent import _ValueBoundFillBackend
 from taste_agent.config import DEFAULT_MODEL_ID
 from taste_agent.guardrails.action import (
     approve,
@@ -32,6 +33,7 @@ from taste_agent.skills.reserve_table.reserve_table import (
 )
 import taste_agent.skills.reserve_table.reserve_table as _rt_module
 from tests.fakes import FakeAgentModel
+from langchain_core.messages import AIMessage, ToolMessage
 
 
 def _factory(_id: str):
@@ -426,11 +428,12 @@ def test_finalize_reservation_requires_approval():
 
 def test_finalize_reservation_clicks_submit_after_approval():
     backend = MockBrowserBackend()
+    backend.set_dom("", "<div>Thank you, your reservation confirmed.</div>")
     aid = register_pending("confirm_reservation", "test")
     approve(aid)
     result = finalize_reservation(aid, backend=backend, submit_selector="button.confirm-x")
     assert result["status"] == "confirmed"
-    assert backend.calls[-1] == ("click", {"selector": "button.confirm-x"})
+    assert ("click", {"selector": "button.confirm-x"}) in backend.calls
 
 
 def test_finalize_reservation_uses_action_id_not_latest_pending():
@@ -445,25 +448,118 @@ def test_finalize_reservation_uses_action_id_not_latest_pending():
     assert result["action_id"] == aid_a
 
 
+def test_finalize_reservation_prefers_submit_selector_stored_on_approval():
+    backend = MockBrowserBackend()
+    backend.set_dom("", "<div>Booking request received.</div>")
+    aid = register_pending(
+        "confirm_reservation",
+        "test",
+        args={"submit_selector": "button.real-submit"},
+    )
+    approve(aid)
+    result = finalize_reservation(aid, backend=backend, submit_selector="button.confirm-x")
+    assert result["status"] == "confirmed"
+    assert ("click", {"selector": "button.real-submit"}) in backend.calls
+
+
+def test_finalize_reservation_returns_rediscovery_payload_on_submit_failure(monkeypatch):
+    class _TimeoutBackend(MockBrowserBackend):
+        def click(self, selector: str) -> None:
+            raise TimeoutError("selector matched 1 element(s), but none were visible")
+
+    backend = _TimeoutBackend()
+    aid = register_pending(
+        "confirm_reservation",
+        "Reserve at June Cafe",
+        args={
+            "submit_selector": "button.real-submit",
+            "place_name": "June Cafe",
+            "reservation_url": "https://june-cafe.resos.com/booking",
+        },
+    )
+    approve(aid)
+
+    def _fake_discovery(**_kwargs):
+        return {
+            "messages": [],
+            "last_message_text": "Email and terms are still required.",
+            "actions": [("raw_html", {})],
+            "final_url": "https://june-cafe.resos.com/booking",
+            "final_dom": (
+                "<form>"
+                "<input name='email' />"
+                "<input name='phone' />"
+                "<input name='name' />"
+                "</form>"
+            ),
+        }
+
+    monkeypatch.setattr(
+        "taste_agent.skills.reserve_table.reserve_table.run_browser_discovery_subagent",
+        _fake_discovery,
+    )
+
+    result = finalize_reservation(aid, backend=backend)
+    assert result["status"] == "needs_rediscovery"
+    assert result["recovery"]["status"] == "partial_booking_flow"
+
+
 def test_finalize_reservation_lifts_forbidden_before_click():
     """Even if the submit selector is currently forbidden, finalize lifts it
     before clicking (after the deterministic gate passes)."""
     backend = MockBrowserBackend()
+    backend.set_dom("", "<div>Reservation confirmed.</div>")
     backend.forbidden_selectors.add("button.confirm-x")
     aid = register_pending("confirm_reservation", "test")
     approve(aid)
     # Should not raise — finalize discards the forbid first
     result = finalize_reservation(aid, backend=backend, submit_selector="button.confirm-x")
     assert result["status"] == "confirmed"
-    assert backend.calls[-1] == ("click", {"selector": "button.confirm-x"})
+    assert ("click", {"selector": "button.confirm-x"}) in backend.calls
 
 
 def test_finalize_reservation_consumes_pending():
     backend = MockBrowserBackend()
+    backend.set_dom("", "<div>Reservation confirmed.</div>")
     aid = register_pending("confirm_reservation", "test")
     approve(aid)
     finalize_reservation(aid, backend=backend)
     assert get_pending() is None
+
+
+def test_finalize_reservation_recovers_when_click_succeeds_but_form_still_visible(monkeypatch):
+    backend = MockBrowserBackend()
+    backend.set_dom(
+        "",
+        "<form><input name='email' /><button type='submit'>Submit Booking Request</button></form>",
+    )
+    aid = register_pending(
+        "confirm_reservation",
+        "Reserve at June Cafe",
+        args={
+            "submit_selector": "button.real-submit",
+            "place_name": "June Cafe",
+            "reservation_url": "https://june-cafe.resos.com/booking",
+        },
+    )
+    approve(aid)
+
+    def _fake_discovery(**_kwargs):
+        return {
+            "messages": [],
+            "last_message_text": "Email is still required.",
+            "actions": [("raw_html", {})],
+            "final_url": "https://june-cafe.resos.com/booking",
+            "final_dom": "<form><input name='email' /></form>",
+        }
+
+    monkeypatch.setattr(
+        "taste_agent.skills.reserve_table.reserve_table.run_browser_discovery_subagent",
+        _fake_discovery,
+    )
+
+    result = finalize_reservation(aid, backend=backend)
+    assert result["status"] == "needs_rediscovery"
 
 
 def test_finalize_reservation_rejects_unknown_action_id():
@@ -548,6 +644,85 @@ def test_run_impl_subagent_path_returns_failed_when_no_approval_registered():
     )
     assert result["status"] == "failed"
     assert "approval" in result["error"]
+
+
+def test_run_impl_returns_needs_user_input_when_subagent_requests_missing_field(monkeypatch):
+    backend = MockBrowserBackend()
+
+    def _fake_run_browser_subagent(**_kwargs):
+        return {
+            "messages": [],
+            "last_message_text": (
+                "Need an email address to proceed. Please provide Nick's email "
+                "before I can continue."
+            ),
+            "actions": [("fill", {"selector": "input[name='name']", "value": "Nick"})],
+        }
+
+    monkeypatch.setattr(
+        "taste_agent.skills.reserve_table.reserve_table.run_browser_subagent",
+        _fake_run_browser_subagent,
+    )
+
+    result = _run_impl(
+        place_name="June Cafe",
+        reservation_url="https://june-cafe.resos.com/booking",
+        date="2026-05-16",
+        time="17:00",
+        party_size=2,
+        contact_name="Nick",
+        contact_phone="",
+        backend=backend,
+        model_factory=_factory,
+    )
+
+    assert result["status"] == "needs_user_input"
+    assert result["source"] == "agentic_missing_info"
+    assert result["missing_required_fields"] == ["contact_email"]
+    assert result["required_field_prompts"] == ["email address"]
+    assert "email" in result["message"].lower()
+
+
+def test_run_impl_downgrades_pending_approval_when_blank_required_fill_was_blocked(monkeypatch):
+    backend = MockBrowserBackend()
+    pending = register_pending("confirm_reservation", "Reserve at June Cafe")
+
+    def _fake_run_browser_subagent(**_kwargs):
+        return {
+            "messages": [
+                ToolMessage(
+                    content=(
+                        "could not fill input[name='email']: Refusing to fill "
+                        "\"input[name='email']\" with a blank value; leave the field untouched "
+                        "and ask the user if that detail is required."
+                    ),
+                    tool_call_id="tool1",
+                ),
+                AIMessage(content="reservation prepared for review."),
+            ],
+            "last_message_text": "reservation prepared for review.",
+            "actions": [("fill", {"selector": "input[name='name']", "value": "Nick"})],
+        }
+
+    monkeypatch.setattr(
+        "taste_agent.skills.reserve_table.reserve_table.run_browser_subagent",
+        _fake_run_browser_subagent,
+    )
+    result = _run_impl(
+        place_name="June Cafe",
+        reservation_url="https://june-cafe.resos.com/booking",
+        date="2026-05-16",
+        time="17:00",
+        party_size=2,
+        contact_name="Nick",
+        contact_phone="",
+        backend=backend,
+        model_factory=_factory,
+    )
+
+    assert result["status"] == "needs_user_input"
+    assert result["missing_required_fields"] == ["contact_email"]
+    assert get_pending() is None
 
 
 def test_run_impl_caches_trace_only_on_pending_outcome():
@@ -667,3 +842,53 @@ def test_run_browser_subagent_returns_only_actions_from_current_run(monkeypatch)
         ("navigate", {"url": "https://new.example/reserve"}),
         ("fill", {"selector": "input#name", "value": "Ana"}),
     ]
+
+
+def test_value_bound_fill_backend_rejects_invented_values():
+    backend = MockBrowserBackend()
+    guarded = _ValueBoundFillBackend(
+        backend,
+        allowed_fill_values={"2026-05-20", "20:00", "2", "Ana"},
+    )
+
+    with pytest.raises(PermissionError, match="unapproved value"):
+        guarded.fill("input[name='phone']", "1234567890")
+
+    guarded.fill("input[name='name']", "Ana")
+    assert backend.calls == [("fill", {"selector": "input[name='name']", "value": "Ana"})]
+
+
+def test_value_bound_fill_backend_rejects_blank_values():
+    backend = MockBrowserBackend()
+    guarded = _ValueBoundFillBackend(
+        backend,
+        allowed_fill_values={"2026-05-20", "20:00", "2", "Ana"},
+    )
+
+    with pytest.raises(PermissionError, match="blank value"):
+        guarded.fill("input[name='email']", "")
+
+
+def test_known_user_fill_values_is_value_based_not_field_based():
+    values = _rt_module._known_user_fill_values(
+        "2026-05-20",
+        "17:00",
+        2,
+        "Nick",
+        "",
+    )
+    assert values == {"2026-05-20", "17:00", "2", "Nick"}
+
+
+def test_trim_old_html_tool_messages_keeps_only_recent_full_html():
+    messages = [
+        ToolMessage(content="<html>old-1</html>", tool_call_id="t1"),
+        ToolMessage(content="<html>old-2</html>", tool_call_id="t2"),
+        ToolMessage(content="<html>recent-1</html>", tool_call_id="t3"),
+        ToolMessage(content="<html>recent-2</html>", tool_call_id="t4"),
+    ]
+    trimmed = _trim_old_html_tool_messages(messages, keep_last_n=2)
+    assert "older raw HTML omitted" in trimmed[0].content
+    assert "older raw HTML omitted" in trimmed[1].content
+    assert trimmed[2].content == "<html>recent-1</html>"
+    assert trimmed[3].content == "<html>recent-2</html>"

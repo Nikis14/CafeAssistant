@@ -12,11 +12,14 @@ orchestrator's job, gated by ``taste_agent.guardrails.action``.
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
 import re
 from typing import Any
 from urllib.parse import urlparse
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage
+from pydantic import BaseModel, ValidationError
 
 from taste_agent.browser.backend import BrowserBackend, MockBrowserBackend
 from taste_agent.browser.parser_cache import (
@@ -29,7 +32,11 @@ from taste_agent.browser.parser_cache import (
 )
 from taste_agent.browser.spec_cache import delete_spec, get_spec, save_spec
 from taste_agent.browser.specs import BookingFieldSpec, BookingFlowSpec, BookingFlowStep
-from taste_agent.browser.sub_agent import run_browser_discovery_subagent, run_browser_subagent
+from taste_agent.browser.sub_agent import (
+    _ValueBoundFillBackend,
+    run_browser_discovery_subagent,
+    run_browser_subagent,
+)
 from taste_agent.config import ALLOW_RUNTIME_MOCKS, DEFAULT_MODEL_ID
 from taste_agent.guardrails.action import (
     consume,
@@ -188,8 +195,18 @@ _FIELD_REQUEST_LABELS = {
     "time": "time (HH:MM)",
     "party_size": "party size",
     "contact_name": "name for the reservation",
+    "contact_email": "email address",
     "contact_phone": "contact phone (optional)",
+    "country_dial_code": "country dial code",
+    "terms_acceptance": "acceptance of the terms",
 }
+
+
+class _MissingFieldExtractionPayload(BaseModel):
+    needs_user_input: bool
+    missing_required_fields: list[str]
+    required_field_prompts: list[str]
+    message: str = ""
 
 
 def _has_prepare_ready_required_fields(fields: list[BookingFieldSpec]) -> bool:
@@ -221,8 +238,14 @@ def _infer_field_from_selector(selector: str) -> tuple[str, str] | None:
         return ("time", "time")
     if "party" in lowered or "guest" in lowered or "people" in lowered:
         return ("party_size", "integer")
+    if "email" in lowered or "e-mail" in lowered:
+        return ("contact_email", "email")
     if "phone" in lowered or "tel" in lowered:
         return ("contact_phone", "phone")
+    if "countrydialcode" in lowered or "dialcode" in lowered:
+        return ("country_dial_code", "text")
+    if "term" in lowered:
+        return ("terms_acceptance", "checkbox")
     if "name" in lowered:
         return ("contact_name", "text")
     return None
@@ -387,8 +410,231 @@ def _booking_values(
     }
 
 
+def _known_user_fill_values(*raw_values: object) -> set[str]:
+    """Return the exact non-empty values we are allowed to type into the form.
+
+    This is intentionally value-based, not schema-based: the browser agent may
+    discover arbitrary fields on arbitrary sites, but it must never invent
+    user data that was not explicitly supplied or deterministically normalized
+    from supplied values.
+    """
+    allowed: set[str] = set()
+    for value in raw_values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        allowed.add(text)
+    return allowed
+
+
 def _field_request_label(field_name: str) -> str:
     return _FIELD_REQUEST_LABELS.get(field_name, field_name.replace("_", " "))
+
+
+def _parse_missing_field_payload(text: str) -> _MissingFieldExtractionPayload:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("no JSON object found in missing-field extractor output")
+    return _MissingFieldExtractionPayload.model_validate(json.loads(text[start : end + 1]))
+
+
+def _fallback_missing_field_extraction(last_message_text: str) -> dict[str, Any] | None:
+    lowered = last_message_text.lower()
+    if not any(token in lowered for token in ("need", "required", "provide", "missing", "proceed")):
+        return None
+
+    candidates: list[tuple[str, tuple[str, ...]]] = [
+        ("contact_email", ("email", "e-mail")),
+        ("contact_phone", ("phone", "telephone", "mobile")),
+        ("terms_acceptance", ("terms", "accept the terms", "acceptance")),
+        ("country_dial_code", ("country code", "dial code")),
+        ("contact_name", ("name",)),
+    ]
+    missing_required_fields: list[str] = []
+    for field_name, needles in candidates:
+        if any(needle in lowered for needle in needles):
+            missing_required_fields.append(field_name)
+
+    if not missing_required_fields:
+        return None
+
+    required_field_prompts = [_field_request_label(name) for name in missing_required_fields]
+    return {
+        "status": "needs_user_input",
+        "source": "agentic_missing_info",
+        "missing_required_fields": missing_required_fields,
+        "required_field_prompts": required_field_prompts,
+        "message": last_message_text.strip(),
+        "next_step": "Ask the user for: " + ", ".join(required_field_prompts) + ".",
+    }
+
+
+def _extract_missing_fields_from_tool_messages(messages: list[Any]) -> dict[str, Any] | None:
+    missing_required_fields: list[str] = []
+    for message in messages:
+        content = getattr(message, "content", None)
+        if not isinstance(content, str):
+            continue
+        lowered = content.lower()
+        if "could not fill " not in lowered:
+            continue
+        if (
+            "blank values are not allowed" not in lowered
+            and "blank value" not in lowered
+            and "user did not provide that booking detail" not in lowered
+        ):
+            continue
+        match = re.search(r"could not fill\s+(.+?):", content, flags=re.IGNORECASE)
+        if not match:
+            continue
+        selector = match.group(1).strip()
+        inferred = _infer_field_from_selector(selector)
+        if inferred is None:
+            continue
+        field_name, _field_type = inferred
+        if field_name not in missing_required_fields:
+            missing_required_fields.append(field_name)
+
+    if not missing_required_fields:
+        return None
+
+    required_field_prompts = [_field_request_label(name) for name in missing_required_fields]
+    return {
+        "status": "needs_user_input",
+        "source": "agentic_missing_info",
+        "missing_required_fields": missing_required_fields,
+        "required_field_prompts": required_field_prompts,
+        "message": "The form still needs additional user-provided details before it is ready for approval.",
+        "next_step": "Ask the user for: " + ", ".join(required_field_prompts) + ".",
+    }
+
+
+def _extract_missing_user_input(
+    *,
+    last_message_text: str,
+    place_name: str,
+    reservation_url: str,
+    date: str,
+    time: str,
+    party_size: int,
+    contact_name: str,
+    contact_phone: str,
+    model_factory: Callable[[str], BaseChatModel],
+    model_id: str,
+) -> dict[str, Any] | None:
+    text = last_message_text.strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if not any(token in lowered for token in ("need", "required", "provide", "missing", "proceed")):
+        return None
+
+    prompt = (
+        "You are extracting whether a browser booking agent has explicitly asked "
+        "for additional user-provided information before it can request final "
+        "approval.\n"
+        "Return strict JSON with shape:\n"
+        '{"needs_user_input": true|false, "missing_required_fields": ["snake_case_field"], '
+        '"required_field_prompts": ["user-facing prompt"], "message": "..."}\n'
+        "Only return needs_user_input=true if the message explicitly says the "
+        "agent still needs the user to provide or confirm some missing detail.\n"
+        "Known booking details already supplied by the user:\n"
+        f"- place_name: {place_name}\n"
+        f"- reservation_url: {reservation_url}\n"
+        f"- date: {date}\n"
+        f"- time: {time}\n"
+        f"- party_size: {party_size}\n"
+        f"- contact_name: {contact_name}\n"
+        f"- contact_phone: {contact_phone or '(not provided)'}\n\n"
+        f"Sub-agent final message:\n{text}"
+    )
+    try:
+        llm = model_factory(model_id)
+        raw = llm.invoke([HumanMessage(content=prompt)])
+        content = raw.content if isinstance(raw.content, str) else str(raw.content)
+        payload = _parse_missing_field_payload(content)
+        if not payload.needs_user_input:
+            return None
+        prompts = payload.required_field_prompts or [
+            _field_request_label(name) for name in payload.missing_required_fields
+        ]
+        return {
+            "status": "needs_user_input",
+            "source": "agentic_missing_info",
+            "missing_required_fields": payload.missing_required_fields,
+            "required_field_prompts": prompts,
+            "message": payload.message or text,
+            "next_step": "Ask the user for: " + ", ".join(prompts) + ".",
+        }
+    except (ValueError, json.JSONDecodeError, ValidationError) as e:
+        logger.warning("missing-field extractor parse/validate failed: %s", e)
+    except Exception as e:  # pragma: no cover
+        logger.warning("missing-field extractor failed: %s", e)
+
+    return _fallback_missing_field_extraction(text)
+
+
+def _post_submit_looks_successful(html: str) -> bool:
+    lowered = html.lower()
+    success_markers = (
+        "thank you",
+        "reservation confirmed",
+        "booking confirmed",
+        "booking request received",
+        "reservation request received",
+        "your reservation is confirmed",
+        "your booking is confirmed",
+        "confirmation",
+        "we have received your booking request",
+    )
+    return any(marker in lowered for marker in success_markers)
+
+
+def _post_submit_still_looks_like_form(html: str, submit_selector: str) -> bool:
+    lowered = html.lower()
+    submit_hint = submit_selector.lower() if submit_selector else ""
+    form_markers = (
+        "input name=",
+        "textarea",
+        "type=\"submit\"",
+        "type='submit'",
+        "terms",
+        "aria-invalid",
+        "muiinputbase-input",
+        "booking request",
+        "your contact information",
+    )
+    return any(marker in lowered for marker in form_markers) or (
+        submit_hint and submit_hint in lowered
+    )
+
+
+def _form_fingerprint(html: str) -> tuple[str, ...]:
+    selectors: set[str] = set()
+    patterns = [
+        r"""<(?:input|select|textarea)[^>]*name=['"]([^'"]+)['"]""",
+        r"""<(?:input|select|textarea)[^>]*id=['"]([^'"]+)['"]""",
+        r"""<button[^>]*type=['"]submit['"][^>]*>(.*?)</button>""",
+        r"""<button[^>]*aria-label=['"]([^'"]+)['"]""",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, html, flags=re.IGNORECASE | re.DOTALL):
+            value = " ".join(match.group(1).split()).strip().lower()
+            if value:
+                selectors.add(value)
+    return tuple(sorted(selectors))
+
+
+def _post_submit_still_looks_like_same_form(pre_html: str, post_html: str) -> bool:
+    before = set(_form_fingerprint(pre_html))
+    after = set(_form_fingerprint(post_html))
+    if not before or not after:
+        return False
+    overlap = before & after
+    return len(overlap) >= min(3, len(before), len(after))
 
 
 def _build_discovery_payload(
@@ -442,6 +688,23 @@ def _build_discovery_payload(
     if message:
         payload["message"] = message
     return payload
+
+
+def _rediscovery_goal_after_submit_failure(
+    *,
+    place_name: str,
+    reservation_url: str,
+    failure_reason: str,
+) -> str:
+    return (
+        f"Re-evaluate the online reservation flow for {place_name}. You are on "
+        f"{reservation_url}. A submit attempt or late-stage interaction did not "
+        f"complete successfully. Failure feedback: {failure_reason}. Inspect the "
+        "current rendered page, identify any validation errors, missing required "
+        "fields, checkboxes, or earlier steps that still block submission, and "
+        "determine what additional information is needed before retrying. Do not "
+        "fill or submit anything."
+    )
 
 
 def _discovery_goal(*, place_name: str, reservation_url: str) -> str:
@@ -536,6 +799,8 @@ def _prepare_from_spec(
             args={
                 "source": "spec",
                 "submit_selector": flow_spec.submit_selector or _DEFAULT_SUBMIT_SELECTOR,
+                "place_name": place_name,
+                "reservation_url": reservation_url,
             },
         )
         return {
@@ -651,7 +916,12 @@ def _replay_cached(
         action_id = register_pending(
             tool_name="confirm_reservation",
             summary=summary,
-            args={"source": "cached", "submit_selector": _DEFAULT_SUBMIT_SELECTOR},
+            args={
+                "source": "cached",
+                "submit_selector": _DEFAULT_SUBMIT_SELECTOR,
+                "place_name": place_name,
+                "reservation_url": reservation_url,
+            },
         )
         cached_spec = get_spec(reservation_url)
         return {
@@ -728,11 +998,21 @@ def _run_impl(
             contact_name=contact_name,
             contact_phone=contact_phone,
         )
+        guarded_backend = _ValueBoundFillBackend(
+            backend,
+            allowed_fill_values=_known_user_fill_values(
+                date,
+                time,
+                party_size,
+                contact_name,
+                contact_phone,
+            ),
+        )
 
         try:
             result = run_browser_subagent(
                 goal=goal,
-                backend=backend,
+                backend=guarded_backend,
                 model_factory=model_factory,
                 model_id=model_id,
             )
@@ -750,6 +1030,21 @@ def _run_impl(
         if pending_after is None:
             logger.warning("sub-agent finished without registering approval")
             backend.forbidden_selectors.discard(_DEFAULT_SUBMIT_SELECTOR)
+            extracted = _extract_missing_user_input(
+                last_message_text=str(result.get("last_message_text", "")),
+                place_name=place_name,
+                reservation_url=reservation_url,
+                date=date,
+                time=time,
+                party_size=party_size,
+                contact_name=contact_name,
+                contact_phone=contact_phone,
+                model_factory=model_factory,
+                model_id=model_id,
+            )
+            if extracted is not None:
+                extracted["actions"] = result.get("actions", [])
+                return extracted
             return {
                 "status": "failed",
                 "error": "sub-agent finished without registering approval",
@@ -757,6 +1052,14 @@ def _run_impl(
             }
 
         actions = result.get("actions", [])
+        extracted_from_tools = _extract_missing_fields_from_tool_messages(
+            list(result.get("messages", []))
+        )
+        if extracted_from_tools is not None:
+            consume(pending_after.action_id)
+            backend.forbidden_selectors.discard(_DEFAULT_SUBMIT_SELECTOR)
+            extracted_from_tools["actions"] = actions
+            return extracted_from_tools
         logger.info(
             "browser recipe discovered for host=%s\n%s",
             host_of(reservation_url),
@@ -898,10 +1201,88 @@ def finalize_reservation(
         # possible and the gate validated *this* id, so use *this* summary.
         approval = get(action_id)
         summary = approval.summary if approval else "(unknown)"
+        effective_submit_selector = submit_selector
+        if approval and approval.args.get("submit_selector"):
+            effective_submit_selector = str(approval.args["submit_selector"])
+        place_name = str(approval.args.get("place_name", "")) if approval else ""
+        recovery_url = str(approval.args.get("reservation_url", "")) if approval else ""
+        if not effective_submit_selector:
+            result = {
+                "status": "failed",
+                "action_id": action_id,
+                "summary": summary,
+                "error": "final submit selector was not captured during approval",
+            }
+            debug_exit("finalize_reservation", result=result)
+            return result
         # Lift the forbid for this specific selector now that the gate passed,
         # then perform the irreversible action.
-        bk.forbidden_selectors.discard(submit_selector)
-        bk.click(submit_selector)
+        bk.forbidden_selectors.discard(effective_submit_selector)
+        try:
+            pre_submit_html = bk.raw_html()
+        except Exception:
+            pre_submit_html = ""
+        try:
+            bk.click(effective_submit_selector)
+        except Exception as e:
+            failure_reason = str(e)
+        else:
+            failure_reason = ""
+            try:
+                post_submit_html = bk.raw_html()
+            except Exception:
+                post_submit_html = ""
+            if not _post_submit_looks_successful(post_submit_html) and _post_submit_still_looks_like_form(
+                post_submit_html, effective_submit_selector
+            ):
+                failure_reason = (
+                    "submit click did not produce a recognizable confirmation state; "
+                    "the page still looks like an unresolved booking form"
+                )
+            elif not _post_submit_looks_successful(post_submit_html) and _post_submit_still_looks_like_same_form(
+                pre_submit_html, post_submit_html
+            ):
+                failure_reason = (
+                    "submit click did not materially change the visible booking form; "
+                    "the same required fields still appear after submission"
+                )
+
+        if failure_reason:
+            current_url = bk.current_url()
+            discovery_result = run_browser_discovery_subagent(
+                goal=_rediscovery_goal_after_submit_failure(
+                    place_name=place_name or "this venue",
+                    reservation_url=recovery_url or current_url,
+                    failure_reason=failure_reason,
+                ),
+                backend=bk,
+                model_factory=_default_model_factory,
+                model_id=DEFAULT_MODEL_ID,
+                initial_url=current_url,
+            )
+            flow_spec = _spec_from_discovery(
+                place_name=place_name or "this venue",
+                reservation_url=recovery_url or current_url,
+                actions=discovery_result.get("actions", []),
+                final_url=str(discovery_result.get("final_url", current_url)),
+                final_dom=str(discovery_result.get("final_dom", "")),
+            )
+            result = _build_discovery_payload(
+                flow_spec=flow_spec,
+                source="submit_recovery",
+                message=discovery_result.get("last_message_text", ""),
+            )
+            consume(action_id)
+            recovery_payload = {
+                "status": "needs_rediscovery",
+                "action_id": action_id,
+                "summary": summary,
+                "error": failure_reason,
+                "recovery": result,
+            }
+            debug_exit("finalize_reservation", result=recovery_payload)
+            return recovery_payload
+
         consume(action_id)
         logger.info("reservation finalized: %s", summary)
         result = {"status": "confirmed", "action_id": action_id, "summary": summary}

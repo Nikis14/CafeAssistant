@@ -6,6 +6,8 @@ The top-level flow is explicit:
                                  ├── approve   → finalize → END
                                  ├── cancel    → cancel   → END
                                  └── agent     → agent → output_guardrail
+                                                    → memory_gate → reflection
+                                                    → procedural_derive
                                                     → format_agent_response → END
 
 Why a state graph (not imperative): each step is a single-responsibility node
@@ -664,6 +666,28 @@ def finalize_node(state: OrchestratorState) -> dict[str, Any]:
                 },
             }
         outcome = finalize_reservation(aid)
+        if outcome.get("status") == "needs_rediscovery":
+            recovery = outcome.get("recovery", {})
+            missing = recovery.get("missing_required_fields", [])
+            prompts = recovery.get("required_field_prompts", [])
+            if prompts:
+                details = ", ".join(prompts)
+            elif missing:
+                details = ", ".join(str(x) for x in missing)
+            else:
+                details = "additional required details"
+            reason = outcome.get("error", "the site still shows unresolved validation issues")
+            return {
+                "response_text": (
+                    "The site still needs more information before the reservation can be submitted. "
+                    f"Current blocker: {reason}. Please provide or confirm: {details}."
+                ),
+                "debug": {
+                    "refused": False,
+                    "approval_action": "needs_rediscovery",
+                    "action_id": aid,
+                },
+            }
         return {
             "response_text": f"Done. {outcome['summary']}",
             "debug": {
@@ -991,10 +1015,8 @@ def _build_orchestrator_graph() -> Any:
     )
     g.add_edge("finalize", END)
     g.add_edge("cancel", END)
-    # Agent path: agent → output_guardrail → memory_gate → reflection
-    # → procedural_derive → format_agent_response → END. Reflection and
-    # procedural_derive update memory in the background; format_agent_response
-    # weaves any clarifications from reflection into the user-facing reply.
+    # Agent path: agent → output_guardrail → memory_gate → reflection →
+    # procedural_derive → format_agent_response → END.
     g.add_edge("agent", "output_guardrail")
     g.add_edge("output_guardrail", "memory_gate")
     g.add_edge("memory_gate", "reflection")

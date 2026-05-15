@@ -153,3 +153,80 @@ def test_place_discovery_preserves_both_error_paths(monkeypatch):
     assert result[0]["source"] == "error"
     assert "Places API unavailable." in result[0]["reason"]
     assert "Web enrichment found no reliable place candidates." in result[0]["reason"]
+
+
+def test_place_discovery_fetches_broader_pool_than_final_count(monkeypatch):
+    captured: dict[str, int] = {}
+
+    def fake_places(query: str, location: str, max_results: int):
+        captured["places_max_results"] = max_results
+        return []
+
+    class _EnrichmentTool:
+        @staticmethod
+        def invoke(payload):
+            captured["web_max_results"] = payload["max_results"]
+            return []
+
+    monkeypatch.setattr(_mod, "places_search_run", fake_places)
+    monkeypatch.setattr(_mod, "place_web_enrichment", _EnrichmentTool())
+
+    place_discovery.invoke({"query": "coffee", "location": "Belgrade"})
+
+    assert captured["places_max_results"] == 16
+    assert captured["web_max_results"] == 16
+
+
+def test_place_discovery_ranks_relevant_coffee_places_above_hotels(monkeypatch):
+    def fake_places(query: str, location: str, max_results: int):
+        return [
+            {
+                "name": "Grand Hotel Lobby Bar",
+                "address": "Center",
+                "reason": "Foursquare match: Hotel, Bar",
+                "review_snippet": None,
+                "website_url": "https://hotel.example",
+                "reservation_url": "",
+                "phone": "",
+                "maps_url": "",
+                "source": "foursquare",
+                "status": "ok",
+            },
+            {
+                "name": "Specialty Roastery",
+                "address": "Vracar",
+                "reason": "Foursquare match: Coffee Shop, Roastery",
+                "review_snippet": None,
+                "website_url": "https://roastery.example",
+                "reservation_url": "",
+                "phone": "",
+                "maps_url": "",
+                "source": "foursquare",
+                "status": "ok",
+            },
+        ]
+
+    class _EnrichmentTool:
+        @staticmethod
+        def invoke(payload):
+            return [
+                {
+                    "name": "Specialty Roastery",
+                    "address": "Vracar",
+                    "reason": "Excellent espresso and cappuccino. Source: https://example.com/roastery",
+                    "review_snippet": "Best cappuccino in the area.",
+                    "website_url": "https://roastery.example",
+                    "reservation_url": "",
+                    "phone": "",
+                    "maps_url": "https://maps.example/roastery",
+                    "source": "web_enrichment",
+                    "status": "ok",
+                }
+            ]
+
+    monkeypatch.setattr(_mod, "places_search_run", fake_places)
+    monkeypatch.setattr(_mod, "place_web_enrichment", _EnrichmentTool())
+
+    result = place_discovery.invoke({"query": "best cappuccino coffee", "location": "Belgrade"})
+
+    assert result[0]["name"] == "Specialty Roastery"

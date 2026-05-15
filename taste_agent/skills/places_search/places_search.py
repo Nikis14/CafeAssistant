@@ -1,6 +1,6 @@
 """places_search skill — Foursquare-backed with a mock fallback.
 
-Production path: Foursquare Places API v3, gated by ``FOURSQUARE_API_KEY``.
+Production path: Foursquare Places API, gated by ``FOURSQUARE_API_KEY``.
 When the key is set, ``run`` issues a real lookup and returns live results.
 When the key is unset (tests, offline demos), the same Belgrade mock fixtures
 ship as in Phase 1. The skill's public contract is the same in both modes.
@@ -26,7 +26,8 @@ from taste_agent.logging_ import debug_enter, debug_exit, get_logger, trace
 logger = get_logger(__name__)
 
 _FOURSQUARE_KEY_ENV = "FOURSQUARE_API_KEY"
-_FOURSQUARE_SEARCH_URL = "https://api.foursquare.com/v3/places/search"
+_FOURSQUARE_SEARCH_URL = "https://places-api.foursquare.com/places/search"
+_FOURSQUARE_API_VERSION = "2025-06-17"
 
 
 class PlaceFixture(TypedDict):
@@ -158,7 +159,7 @@ def _string_field(raw: dict[str, Any], *keys: str) -> str:
 def _foursquare_search(
     query: str, location: str, max_results: int, api_key: str
 ) -> list[dict[str, object]]:
-    """Call Foursquare Places v3. Raises ``urllib.error.URLError`` on failure."""
+    """Call the Foursquare Places API. Raises ``urllib.error.URLError`` on failure."""
     params = urllib.parse.urlencode(
         {
             "query": query,
@@ -170,8 +171,9 @@ def _foursquare_search(
     req = urllib.request.Request(
         f"{_FOURSQUARE_SEARCH_URL}?{params}",
         headers={
-            "Authorization": api_key,
+            "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
+            "X-Places-Api-Version": _FOURSQUARE_API_VERSION,
         },
     )
     with urllib.request.urlopen(req, timeout=8) as resp:

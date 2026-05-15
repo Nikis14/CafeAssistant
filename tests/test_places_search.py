@@ -100,6 +100,7 @@ def test_foursquare_path_is_used_when_key_is_set(monkeypatch):
     def fake_urlopen(request, timeout=8):
         captured["url"] = request.full_url
         captured["auth"] = request.headers.get("Authorization")
+        captured["version"] = request.headers.get("X-places-api-version")
         return _FakeHTTPResponse(
             {
                 "results": [
@@ -122,8 +123,9 @@ def test_foursquare_path_is_used_when_key_is_set(monkeypatch):
     monkeypatch.setattr(_ps_module.urllib.request, "urlopen", fake_urlopen)
 
     results = places_search_run("cappuccino", "Belgrade", 5)
-    assert "api.foursquare.com" in captured["url"]
-    assert captured["auth"] == "fake-key"
+    assert "places-api.foursquare.com" in captured["url"]
+    assert captured["auth"] == "Bearer fake-key"
+    assert captured["version"] == "2025-06-17"
     assert len(results) == 1
     assert results[0]["name"] == "Test Cafe"
     assert "Knez Mihailova 1" in results[0]["address"]

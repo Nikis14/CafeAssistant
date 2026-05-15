@@ -159,11 +159,15 @@ class PlaywrightBrowserBackend:
     def _first_visible_locator(self, selector: str):
         locator = self._page.locator(selector)
         count = locator.count()
+        if count == 0:
+            raise TimeoutError(f"no elements matched selector {selector!r}")
         for idx in range(count):
             candidate = locator.nth(idx)
             if candidate.is_visible():
                 return candidate
-        return locator.first
+        raise TimeoutError(
+            f"selector {selector!r} matched {count} element(s), but none were visible"
+        )
 
     def _click_impl(self, selector: str) -> None:
         self._first_visible_locator(selector).click()

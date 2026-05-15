@@ -1,5 +1,5 @@
-"""Output guardrail: PII redaction (deterministic) + factuality / citation
-judgement (LLM).
+"""Output guardrail: deterministic output sanitation, with optional debug-only
+LLM judging.
 
 This completes the three-guardrail-surfaces story. Recap:
 
@@ -8,13 +8,16 @@ This completes the three-guardrail-surfaces story. Recap:
   - Action guardrail (`action.py`) — deterministic confirm-gate on
     irreversible actions. Never LLM-based.
   - Output guardrail (this module) — runs AFTER the agent has produced a
-    response. Two layers:
+    response. Primary layers:
       1. PII regex (deterministic, fast) — strips any phone/email/card the
          agent might have leaked.
-      2. LLM judge (optional, env-controlled) — verifies factuality (claims
-         grounded in the conversation context) and citation hygiene (place
-         names are real, not fabricated). Returns concerns; the caller
-         decides whether to expose them to the user.
+      2. Internal-error scrubber — removes raw provider/env/auth leakage from
+         user-visible text.
+
+Optional:
+  - LLM judge (explicitly enabled only) can annotate factuality / citation
+    concerns for debug and analysis, but it does NOT rewrite the user-facing
+    reply.
 
 **Cost note**: with the judge on, every user turn costs *two* LLM calls
 (the agent itself + this judge). For production, consider prompt caching on
@@ -25,9 +28,7 @@ students see the cost surface.
 Judge model resolution (see ``resolve_judge_model_id``):
   1. ``TASTE_AGENT_SKIP_OUTPUT_JUDGE=1`` → skip
   2. ``TASTE_AGENT_JUDGE_MODEL_ID=<litellm_id>`` → use that model
-  3. ``OPENAI_API_KEY`` set → ``openai/gpt-5-nano``
-  4. ``ANTHROPIC_API_KEY`` set → ``anthropic/claude-haiku-4-5`` (fallback)
-  5. Otherwise → skip (no key for the default judge)
+  3. Otherwise → skip
 
 Per CLAUDE.md, we keep this hand-rolled rather than wrapping NeMo / Guardrails
 AI / LLM Guard so students see what those frameworks do under the hood.
@@ -54,12 +55,6 @@ logger = get_logger(__name__)
 # Env vars controlling judge behavior
 _JUDGE_SKIP_ENV = "TASTE_AGENT_SKIP_OUTPUT_JUDGE"
 _JUDGE_MODEL_ENV = "TASTE_AGENT_JUDGE_MODEL_ID"
-_DEFAULT_JUDGE_MODEL_ID = "openai/gpt-5-nano"
-_DEFAULT_JUDGE_KEY_ENV = "OPENAI_API_KEY"
-_FALLBACK_JUDGE_MODEL_ID = "anthropic/claude-haiku-4-5"
-_FALLBACK_JUDGE_KEY_ENV = "ANTHROPIC_API_KEY"
-
-
 def resolve_judge_model_id() -> str | None:
     """Pick the judge model id from environment, or return None to skip.
 
@@ -72,16 +67,7 @@ def resolve_judge_model_id() -> str | None:
     override = os.environ.get(_JUDGE_MODEL_ENV)
     if override:
         return override
-    if os.environ.get(_DEFAULT_JUDGE_KEY_ENV):
-        return _DEFAULT_JUDGE_MODEL_ID
-    if os.environ.get(_FALLBACK_JUDGE_KEY_ENV):
-        return _FALLBACK_JUDGE_MODEL_ID
-    logger.info(
-        "%s / %s not set and no %s override; skipping output judge",
-        _DEFAULT_JUDGE_KEY_ENV,
-        _FALLBACK_JUDGE_KEY_ENV,
-        _JUDGE_MODEL_ENV,
-    )
+    logger.info("%s not set; skipping output judge", _JUDGE_MODEL_ENV)
     return None
 
 
@@ -292,32 +278,6 @@ def _run_judge(
             return None, f"llm-error: {e}"
 
 
-def _rewrite_on_judge_failure(
-    text: str,
-    *,
-    factuality_ok: bool,
-    citation_ok: bool,
-) -> tuple[str, bool, str | None]:
-    """Replace a judged-bad draft with a grounded fallback.
-
-    The judge has already determined the draft overclaims or cites unsupported
-    specifics. At that point the safe move is to stop the bad draft from
-    reaching the user rather than merely annotate it in debug output.
-    """
-    if factuality_ok and citation_ok:
-        return text, False, None
-    if not factuality_ok:
-        reason = "factuality"
-    else:
-        reason = "citation"
-    rewritten = (
-        "I couldn't verify enough of that reply from grounded results to say it "
-        "confidently. I can keep checking with confirmed sources, or help with "
-        "another place once I verify it."
-    )
-    return rewritten, True, reason
-
-
 # ── Public entry point ───────────────────────────────────────────────────────
 
 
@@ -339,8 +299,8 @@ def run_output_guardrails(
         model_factory: ``(model_id) -> BaseChatModel`` for the judge. If
             None, the judge is skipped.
         judge_model_id: which model to use. If ``None``, resolved from env via
-            ``resolve_judge_model_id()`` — typically Haiku when
-            ``ANTHROPIC_API_KEY`` is set, else skip.
+            ``resolve_judge_model_id()``. By default the judge is skipped
+            unless explicitly enabled via ``TASTE_AGENT_JUDGE_MODEL_ID``.
         skip_judge: explicit override. If ``None``, derived from env / judge
             model resolution.
 
@@ -354,7 +314,7 @@ def run_output_guardrails(
         if skip_judge is None:
             skip_judge = env_model is None
         if judge_model_id is None:
-            judge_model_id = env_model or _DEFAULT_JUDGE_MODEL_ID
+            judge_model_id = env_model or "disabled"
 
     with trace("guardrail:output", skip_judge=skip_judge):
         cleaned, internal_rewritten, internal_concerns = rewrite_internal_error_leaks(
@@ -384,13 +344,8 @@ def run_output_guardrails(
                 judge_error=err,
             )
 
-        final_text, judge_rewritten, judge_rewrite_reason = _rewrite_on_judge_failure(
-            cleaned,
-            factuality_ok=payload.factuality_ok,
-            citation_ok=payload.citation_ok,
-        )
         return OutputGuardrailResult(
-            response_text=final_text,
+            response_text=cleaned,
             pii_leaked=n_pii,
             pii_concerns=pii_concerns,
             factuality_ok=payload.factuality_ok,
@@ -399,7 +354,7 @@ def run_output_guardrails(
             citation_concerns=list(payload.citation_concerns),
             internal_error_rewritten=internal_rewritten,
             internal_error_concerns=internal_concerns,
-            judge_rewritten=judge_rewritten,
-            judge_rewrite_reason=judge_rewrite_reason,
+            judge_rewritten=False,
+            judge_rewrite_reason=None,
             judge_skipped=False,
         )

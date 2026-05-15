@@ -36,7 +36,7 @@ Do not invent the reservation page URL. Invoke this skill only when `reservation
    - It reads the rendered page via `browser_page_context` and may retry page inspection briefly if the first view is only a shell.
    - It uses `browser_wait_for` only as a targeted hint for concrete selectors, not as a fatal gate.
    - It fills date, time, party size, name, phone.
-   - When the form is ready, it calls `request_user_approval` with a summary.
+   - When the form is ready, it calls `request_user_approval` with a summary, the exact final submit selector, the place name, and the current booking URL.
    - It STOPS — it does NOT click the final submit button.
 3. The trace is saved to the parser cache (per host).
 4. The skill returns `{"status": "pending_approval", "action_id": ..., "summary": ...}`.

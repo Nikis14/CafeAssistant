@@ -24,6 +24,7 @@ class _DiscoveryState(TypedDict, total=False):
     query: str
     location: str
     max_results: int
+    fetch_results: int
     places_results: list[dict[str, Any]]
     web_results: list[dict[str, Any]]
     merged_results: list[dict[str, Any]]
@@ -34,7 +35,7 @@ def _places_node(state: _DiscoveryState) -> dict[str, Any]:
         results = places_search_run(
             state["query"],
             state["location"],
-            state["max_results"],
+            state["fetch_results"],
         )
     return {"places_results": results}
 
@@ -45,7 +46,7 @@ def _web_node(state: _DiscoveryState) -> dict[str, Any]:
             {
                 "query": state["query"],
                 "location": state["location"],
-                "max_results": state["max_results"],
+                "max_results": state["fetch_results"],
             }
         )
     return {"web_results": results}
@@ -66,6 +67,48 @@ def _merge_reason(places_reason: str, web_reason: str) -> str:
     if places_reason and web_reason:
         return f"{places_reason} Web: {web_reason}"
     return places_reason or web_reason
+
+
+def _query_terms(query: str) -> set[str]:
+    return {token for token in re.findall(r"\w+", query.lower()) if len(token) >= 3}
+
+
+def _score_candidate(candidate: dict[str, Any], *, query: str) -> tuple[int, int]:
+    haystacks = [
+        str(candidate.get("name", "")),
+        str(candidate.get("reason", "")),
+        str(candidate.get("review_snippet", "")),
+        str(candidate.get("address", "")),
+    ]
+    text = " ".join(haystacks).lower()
+    score = 0
+    for term in _query_terms(query):
+        if term in text:
+            score += 3
+
+    source = str(candidate.get("source", ""))
+    if source == "places+web":
+        score += 6
+    elif source == "web_enrichment":
+        score += 3
+    elif source == "foursquare":
+        score += 2
+
+    lowered_query = query.lower()
+    if any(token in lowered_query for token in ("coffee", "cafe", "café", "espresso", "cappuccino", "roastery")):
+        if any(token in text for token in ("coffee", "cafe", "café", "espresso", "cappuccino", "roastery", "specialty")):
+            score += 5
+        if "hotel" in text:
+            score -= 6
+
+    if candidate.get("website_url"):
+        score += 1
+    if candidate.get("maps_url"):
+        score += 1
+    if candidate.get("review_snippet"):
+        score += 1
+
+    return score, len(str(candidate.get("reason", "")))
 
 
 def _summarize_error_results(
@@ -105,6 +148,7 @@ def _merge_results(
     places_results: list[dict[str, Any]],
     web_results: list[dict[str, Any]],
     *,
+    query: str,
     max_results: int,
 ) -> list[dict[str, Any]]:
     places_ok = [r for r in places_results if not _is_error_result(r) and r.get("name")]
@@ -156,6 +200,7 @@ def _merge_results(
             continue
         merged.append(dict(web_item))
 
+    merged.sort(key=lambda item: _score_candidate(item, query=query), reverse=True)
     return merged[:max_results]
 
 
@@ -163,6 +208,7 @@ def _merge_node(state: _DiscoveryState) -> dict[str, Any]:
     merged = _merge_results(
         state.get("places_results", []),
         state.get("web_results", []),
+        query=state["query"],
         max_results=state["max_results"],
     )
     return {"merged_results": merged}
@@ -203,7 +249,7 @@ def reset_graph_cache() -> None:
 
 @tool
 def place_discovery(
-    query: str, location: str = "Belgrade", max_results: int = 5
+    query: str, location: str = "Belgrade", max_results: int = 8
 ) -> list[dict[str, Any]]:
     """Discover restaurant/cafe candidates by combining structured places and web.
 
@@ -215,6 +261,7 @@ def place_discovery(
         "query": query,
         "location": location,
         "max_results": max_results,
+        "fetch_results": max(max_results * 2, 12),
     }
     with trace("tool:place_discovery", query=query[:80], location=location):
         final_state = _get_graph().invoke(initial_state)

@@ -264,7 +264,7 @@ def test_judge_accepts_well_formed_payload():
     assert "fabricated place" in result.factuality_concerns
 
 
-def test_judge_rewrites_bad_draft_before_returning_to_user():
+def test_judge_does_not_rewrite_bad_draft_before_returning_to_user():
     factory = _judge_factory(
         '{"factuality_ok": false, "factuality_concerns": ["fabricated place"], "citation_ok": true, "citation_concerns": []}'
     )
@@ -273,13 +273,12 @@ def test_judge_rewrites_bad_draft_before_returning_to_user():
         model_factory=factory,
         skip_judge=False,
     )
-    assert result.judge_rewritten is True
-    assert result.judge_rewrite_reason == "factuality"
-    assert "Atlantis" not in result.response_text
-    assert "couldn't verify enough" in result.response_text
+    assert result.judge_rewritten is False
+    assert result.judge_rewrite_reason is None
+    assert result.response_text == "Try Atlantis in Belgrade."
 
 
-def test_judge_rewrites_unsupported_citation_claims():
+def test_judge_does_not_rewrite_unsupported_citation_claims():
     factory = _judge_factory(
         '{"factuality_ok": true, "factuality_concerns": [], "citation_ok": false, "citation_concerns": ["claimed opening hours not in tool output"]}'
     )
@@ -288,9 +287,9 @@ def test_judge_rewrites_unsupported_citation_claims():
         model_factory=factory,
         skip_judge=False,
     )
-    assert result.judge_rewritten is True
-    assert result.judge_rewrite_reason == "citation"
-    assert "midnight" not in result.response_text
+    assert result.judge_rewritten is False
+    assert result.judge_rewrite_reason is None
+    assert result.response_text == "June Cafe is open until midnight."
 
 
 # ── resolve_judge_model_id (env-driven) ──────────────────────────────────────
@@ -311,24 +310,24 @@ def test_resolve_judge_override_env_takes_precedence(monkeypatch):
     assert resolve_judge_model_id() == "openai/gpt-5-mini"
 
 
-def test_resolve_judge_uses_openai_default_when_key_present(monkeypatch):
+def test_resolve_judge_skips_when_only_openai_key_present(monkeypatch):
     from taste_agent.guardrails.output import resolve_judge_model_id
 
     monkeypatch.delenv("TASTE_AGENT_SKIP_OUTPUT_JUDGE", raising=False)
     monkeypatch.delenv("TASTE_AGENT_JUDGE_MODEL_ID", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key")
-    assert resolve_judge_model_id() == "openai/gpt-5-nano"
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert resolve_judge_model_id() is None
 
 
-def test_resolve_judge_falls_back_to_anthropic_when_openai_missing(monkeypatch):
+def test_resolve_judge_skips_when_only_anthropic_key_present(monkeypatch):
     from taste_agent.guardrails.output import resolve_judge_model_id
 
     monkeypatch.delenv("TASTE_AGENT_SKIP_OUTPUT_JUDGE", raising=False)
     monkeypatch.delenv("TASTE_AGENT_JUDGE_MODEL_ID", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key")
-    assert resolve_judge_model_id() == "anthropic/claude-haiku-4-5"
+    assert resolve_judge_model_id() is None
 
 
 def test_resolve_judge_skips_when_no_key_and_no_override(monkeypatch):

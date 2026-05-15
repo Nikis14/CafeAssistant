@@ -149,11 +149,9 @@ def system_prompt(
             ``ProceduralMemory.as_text``); rendered as a trailing block.
     """
     current = now if now is not None else datetime.now(ZoneInfo(tz))
-    city = tz.split("/")[-1].replace("_", " ")
     return load_template("orchestrator").format(
         timestamp=current.strftime("%Y-%m-%d %H:%M"),
         timezone=tz,
-        city=city,
         web_search_tools_section=_render_web_search_tool_section(include_web_search),
         web_search_rule_section=_render_web_search_rule_section(include_web_search),
         facts_section=_render_facts(facts),

@@ -54,11 +54,70 @@ def test_browser_click_tool_drives_backend():
     assert backend.calls == [("click", {"selector": "button.book"})]
 
 
+def test_browser_click_tool_returns_timeout_message_on_hidden_selector():
+    class _TimeoutBackend(MockBrowserBackend):
+        def click(self, selector: str) -> None:
+            raise TimeoutError("selector matched 1 element, but none were visible")
+
+    backend = _TimeoutBackend()
+    tools = build_browser_tools(backend)
+    result = _by_name(tools, "browser_click").invoke({"selector": "div[data-test='date']"})
+    assert "could not click" in result
+    assert "none were visible" in result
+
+
+def test_browser_click_tool_returns_error_message_on_invalid_selector():
+    class _InvalidSelectorBackend(MockBrowserBackend):
+        def click(self, selector: str) -> None:
+            raise ValueError("not a valid selector")
+
+    backend = _InvalidSelectorBackend()
+    tools = build_browser_tools(backend)
+    result = _by_name(tools, "browser_click").invoke({"selector": "button:contains('2')"})
+    assert "could not click" in result
+    assert "not a valid selector" in result
+
+
 def test_browser_fill_tool_drives_backend():
     backend = MockBrowserBackend()
     tools = build_browser_tools(backend)
     _by_name(tools, "browser_fill").invoke({"selector": "input#name", "value": "Ana"})
     assert backend.calls == [("fill", {"selector": "input#name", "value": "Ana"})]
+
+
+def test_browser_fill_tool_returns_timeout_message_on_hidden_selector():
+    class _TimeoutBackend(MockBrowserBackend):
+        def fill(self, selector: str, value: str) -> None:
+            raise TimeoutError("selector matched 1 element, but none were visible")
+
+    backend = _TimeoutBackend()
+    tools = build_browser_tools(backend)
+    result = _by_name(tools, "browser_fill").invoke({"selector": "input[name=name]", "value": "Ana"})
+    assert "could not fill" in result
+    assert "none were visible" in result
+
+
+def test_browser_wait_for_tool_returns_error_message_on_invalid_selector():
+    class _InvalidSelectorBackend(MockBrowserBackend):
+        def wait_for(self, selector: str, timeout_ms: int = 5000) -> None:
+            raise ValueError("not a valid selector")
+
+    backend = _InvalidSelectorBackend()
+    tools = build_browser_tools(backend)
+    result = _by_name(tools, "browser_wait_for").invoke({"selector": "button:contains('2')"})
+    assert "could not wait for" in result
+    assert "not a valid selector" in result
+
+
+def test_browser_page_context_returns_error_message_when_raw_html_fails():
+    class _BrokenBackend(MockBrowserBackend):
+        def raw_html(self) -> str:
+            raise RuntimeError("page crashed")
+
+    backend = _BrokenBackend()
+    tools = build_browser_tools(backend)
+    result = _by_name(tools, "browser_page_context").invoke({})
+    assert result == "could not read page html: page crashed"
 
 
 def test_browser_page_context_tool_returns_raw_html():
@@ -95,6 +154,36 @@ def test_request_user_approval_tool_registers_pending():
     assert pending is not None
     assert pending.action_id == action_id
     assert pending.summary == "Reserve table at Iva, 2 people, May 20 20:00"
+
+
+def test_request_user_approval_tool_stores_submit_selector_when_provided():
+    tool = make_request_approval_tool()
+    result = tool.invoke(
+        {
+            "summary": "Reserve table at Iva, 2 people, May 20 20:00",
+            "submit_selector": "button[type='submit']",
+        }
+    )
+    assert result.startswith("approval_pending:")
+    pending = get_pending()
+    assert pending is not None
+    assert pending.args["submit_selector"] == "button[type='submit']"
+
+
+def test_request_user_approval_tool_stores_recovery_metadata():
+    tool = make_request_approval_tool()
+    tool.invoke(
+        {
+            "summary": "Reserve table at Iva, 2 people, May 20 20:00",
+            "submit_selector": "button[type='submit']",
+            "place_name": "Iva",
+            "reservation_url": "https://iva.example/booking",
+        }
+    )
+    pending = get_pending()
+    assert pending is not None
+    assert pending.args["place_name"] == "Iva"
+    assert pending.args["reservation_url"] == "https://iva.example/booking"
 
 
 def test_tools_share_one_backend_instance():

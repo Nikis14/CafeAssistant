@@ -26,6 +26,10 @@ def build_browser_tools(backend: BrowserBackend) -> list[StructuredTool]:
                 result = f"blocked navigation: {e}"
                 debug_exit("browser_navigate", result=result)
                 return result
+            except Exception as e:
+                result = f"could not navigate to {url}: {e}"
+                debug_exit("browser_navigate", result=result)
+                return result
             result = f"navigated to {url}"
             debug_exit("browser_navigate", result=result)
             return result
@@ -35,7 +39,14 @@ def build_browser_tools(backend: BrowserBackend) -> list[StructuredTool]:
         """Click the element matching the CSS selector."""
         debug_enter("browser_click", selector=selector)
         with trace("tool:browser_click", selector=selector):
-            backend.click(selector)
+            try:
+                backend.click(selector)
+            except PermissionError:
+                raise
+            except Exception as e:
+                result = f"could not click {selector}: {e}"
+                debug_exit("browser_click", result=result)
+                return result
             result = f"clicked {selector}"
             debug_exit("browser_click", result=result)
             return result
@@ -45,7 +56,12 @@ def build_browser_tools(backend: BrowserBackend) -> list[StructuredTool]:
         """Type ``value`` into the form input matching the CSS selector."""
         debug_enter("browser_fill", selector=selector, value=value)
         with trace("tool:browser_fill", selector=selector):
-            backend.fill(selector, value)
+            try:
+                backend.fill(selector, value)
+            except Exception as e:
+                result = f"could not fill {selector}: {e}"
+                debug_exit("browser_fill", result=result)
+                return result
             result = f"filled {selector} with {value!r}"
             debug_exit("browser_fill", result=result)
             return result
@@ -61,6 +77,10 @@ def build_browser_tools(backend: BrowserBackend) -> list[StructuredTool]:
                 result = f"selector {selector} did not appear within {timeout_ms}ms"
                 debug_exit("browser_wait_for", result=result)
                 return result
+            except Exception as e:
+                result = f"could not wait for {selector}: {e}"
+                debug_exit("browser_wait_for", result=result)
+                return result
             result = f"selector {selector} is present"
             debug_exit("browser_wait_for", result=result)
             return result
@@ -70,7 +90,10 @@ def build_browser_tools(backend: BrowserBackend) -> list[StructuredTool]:
         """Return the current rendered page as raw HTML."""
         debug_enter("browser_page_context")
         with trace("tool:browser_page_context"):
-            result = backend.raw_html()
+            try:
+                result = backend.raw_html()
+            except Exception as e:
+                result = f"could not read page html: {e}"
             debug_exit("browser_page_context", result=result)
             return result
 
@@ -92,21 +115,48 @@ def make_request_approval_tool() -> StructuredTool:
     """
 
     @tool
-    def request_user_approval(summary: str) -> str:
+    def request_user_approval(
+        summary: str,
+        submit_selector: str = "",
+        place_name: str = "",
+        reservation_url: str = "",
+    ) -> str:
         """Request user approval for an irreversible action.
 
         Args:
             summary: short human-readable description of what is about to happen.
                 Example: "Reserve table at Iva for 2026-05-20 20:00, party of 2,
                 name: Nikolai S."
+            submit_selector: selector for the final irreversible submit control.
+                Pass this when the final button is known so finalization can
+                click the exact control that was discovered.
+            place_name: human-readable place name for recovery flows.
+            reservation_url: current booking URL for recovery flows.
 
         Returns:
             A string of the form ``approval_pending:<action_id>``. The action
             will not execute until the user explicitly approves via the chat.
         """
-        debug_enter("request_user_approval", summary=summary)
+        debug_enter(
+            "request_user_approval",
+            summary=summary,
+            submit_selector=submit_selector,
+            place_name=place_name,
+            reservation_url=reservation_url,
+        )
         with trace("tool:request_user_approval"):
-            action_id = register_pending(tool_name="confirm_reservation", summary=summary)
+            args: dict[str, str] = {}
+            if submit_selector:
+                args["submit_selector"] = submit_selector
+            if place_name:
+                args["place_name"] = place_name
+            if reservation_url:
+                args["reservation_url"] = reservation_url
+            action_id = register_pending(
+                tool_name="confirm_reservation",
+                summary=summary,
+                args=args,
+            )
             result = f"approval_pending:{action_id}"
             debug_exit("request_user_approval", result=result)
             return result

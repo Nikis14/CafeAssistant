@@ -16,8 +16,10 @@ from collections.abc import Callable
 from urllib.parse import urlparse
 from typing import Any
 
+from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from taste_agent.browser.backend import BrowserBackend
 from taste_agent.config import DEFAULT_MODEL_ID
@@ -26,6 +28,52 @@ from taste_agent.logging_ import debug_enter, debug_exit, get_logger, trace
 from taste_agent.prompts import discovery_subagent_prompt, subagent_prompt
 
 logger = get_logger(__name__)
+
+
+def _looks_like_raw_html(content: str) -> bool:
+    lowered = content.lower()
+    return "<html" in lowered or "<!doctype html" in lowered
+
+
+def _trim_old_html_tool_messages(messages: list[Any], *, keep_last_n: int = 2) -> list[Any]:
+    """Keep only the most recent full raw-HTML tool results in model context."""
+    html_indexes = [
+        idx
+        for idx, msg in enumerate(messages)
+        if isinstance(msg, ToolMessage)
+        and isinstance(msg.content, str)
+        and _looks_like_raw_html(msg.content)
+    ]
+    keep = set(html_indexes[-keep_last_n:])
+    trimmed: list[Any] = []
+    for idx, msg in enumerate(messages):
+        if idx in keep or not isinstance(msg, ToolMessage) or not isinstance(msg.content, str):
+            trimmed.append(msg)
+            continue
+        if idx not in html_indexes:
+            trimmed.append(msg)
+            continue
+        trimmed.append(
+            ToolMessage(
+                content=f"[older raw HTML omitted from context; original length={len(msg.content)} chars]",
+                tool_call_id=msg.tool_call_id,
+                name=msg.name,
+                id=msg.id,
+                status=msg.status,
+                additional_kwargs=msg.additional_kwargs,
+                response_metadata=msg.response_metadata,
+                artifact=msg.artifact,
+            )
+        )
+    return trimmed
+
+
+class _BrowserMessageWindowMiddleware(AgentMiddleware):
+    """Trim older raw-HTML tool outputs from the browser agent's model context."""
+
+    def wrap_model_call(self, request: ModelRequest, handler):
+        trimmed_messages = _trim_old_html_tool_messages(list(request.messages))
+        return handler(request.override(messages=trimmed_messages))
 
 
 class _GroundedDiscoveryBackend:
@@ -54,6 +102,55 @@ class _GroundedDiscoveryBackend:
         self._backend.click(selector)
 
     def fill(self, selector: str, value: str) -> None:
+        self._backend.fill(selector, value)
+
+    def wait_for(self, selector: str, timeout_ms: int = 5000) -> None:
+        self._backend.wait_for(selector, timeout_ms=timeout_ms)
+
+    def screenshot(self) -> bytes:
+        return self._backend.screenshot()
+
+    def dom_snapshot(self, selector: str | None = None) -> str:
+        return self._backend.dom_snapshot(selector)
+
+    def raw_html(self) -> str:
+        return self._backend.raw_html()
+
+    def current_url(self) -> str:
+        return self._backend.current_url()
+
+
+class _ValueBoundFillBackend:
+    """Restrict fill values to the explicit known values supplied by the user.
+
+    This prevents the browser sub-agent from inventing details such as a phone
+    number or email address during the preparation phase. The check is based
+    on exact known values, not on a fixed schema of field names.
+    """
+
+    def __init__(self, backend: BrowserBackend, *, allowed_fill_values: set[str]) -> None:
+        self._backend = backend
+        self._allowed_fill_values = set(allowed_fill_values)
+        self.forbidden_selectors = backend.forbidden_selectors
+        self.calls = getattr(backend, "calls", [])
+
+    def navigate(self, url: str) -> None:
+        self._backend.navigate(url)
+
+    def click(self, selector: str) -> None:
+        self._backend.click(selector)
+
+    def fill(self, selector: str, value: str) -> None:
+        if not str(value).strip():
+            raise PermissionError(
+                f"Refusing to fill {selector!r} with a blank value; leave the field untouched "
+                "and ask the user if that detail is required."
+            )
+        if value and value not in self._allowed_fill_values:
+            raise PermissionError(
+                f"Refusing to fill {selector!r} with unapproved value {value!r}; "
+                "the user did not provide that booking detail."
+            )
         self._backend.fill(selector, value)
 
     def wait_for(self, selector: str, timeout_ms: int = 5000) -> None:
@@ -102,7 +199,7 @@ def run_browser_subagent(
     from langchain.agents import create_agent
 
     llm = model_factory(model_id)
-    agent = create_agent(llm, tools)
+    agent = create_agent(llm, tools, middleware=[_BrowserMessageWindowMiddleware()])
     calls_before = len(getattr(backend, "calls", []))
 
     with trace("sub_agent:browser", goal=goal[:80]):
@@ -183,7 +280,7 @@ def run_browser_discovery_subagent(
     from langchain.agents import create_agent
 
     llm = model_factory(model_id)
-    agent = create_agent(llm, tools)
+    agent = create_agent(llm, tools, middleware=[_BrowserMessageWindowMiddleware()])
     calls_before = len(getattr(backend, "calls", []))
 
     with trace("sub_agent:browser_discovery", goal=goal[:80]):

@@ -21,7 +21,7 @@ If the user is making a reservation, finding a place is a precursor — call thi
 
 - `query` (str, required): free-form description of what the user wants.
 - `location` (str, optional): place name or neighborhood. Defaults to Belgrade.
-- `max_results` (int, optional): default 5.
+- `max_results` (int, optional): default 8.
 
 ## What this skill does internally
 
