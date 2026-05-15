@@ -1,11 +1,8 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "taste-agent"
 version = "0.1.0"
 description = "Personalized restaurant recommender + reservation agent (Seminar 7 capstone)"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "anthropic==0.102.0",
@@ -30,11 +27,20 @@ dependencies = [
     "PyYAML==6.0.3",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pytest==9.0.3",
     "ruff==0.15.12",
+    "pre-commit>=4.6.0",
+    "mypy>=2.1.0",
 ]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+package = false
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Ruff — linter + formatter
