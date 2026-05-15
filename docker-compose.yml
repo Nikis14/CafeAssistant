@@ -1,0 +1,16 @@
+services:
+  taste-agent:
+    build: .
+    image: taste-agent:latest
+    container_name: taste-agent
+    restart: unless-stopped
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:7860/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3

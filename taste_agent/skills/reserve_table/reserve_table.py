@@ -11,9 +11,10 @@ orchestrator's job, gated by ``taste_agent.guardrails.action``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import urlparse
 
@@ -54,8 +55,15 @@ _DEFAULT_SUBMIT_SELECTOR = "button.confirm-reservation"
 _BACKEND_NOT_CONFIGURED_ERROR = "Browser automation is not configured for this environment."
 
 # Module-level backend default. The orchestrator (or tests) can swap it via
-# ``set_default_backend``. Single-process demo; Phase 3 will scope per session.
+# ``set_default_backend``. When unset, production code falls through to the
+# BrowserBackendPool — see ``_checkout_backend_for_flow`` below.
 _DEFAULT_BACKEND: BrowserBackend | None = None
+
+# action_id → backend pinned to a multi-turn reservation flow. ``run()`` adds
+# an entry when a flow reaches ``pending_approval``; ``finalize_reservation``
+# and ``cancel_reservation`` consume it. The pinned backend is returned to the
+# pool on consumption.
+_FLOW_BACKENDS: dict[str, BrowserBackend] = {}
 
 
 def _chat_model_kwargs(model_id: str) -> dict[str, Any]:
@@ -67,7 +75,12 @@ def _chat_model_kwargs(model_id: str) -> dict[str, Any]:
 
 
 def set_default_backend(backend: BrowserBackend) -> None:
-    """Override the module-level backend used by ``run`` / ``finalize_reservation``."""
+    """Override the module-level backend used by ``run`` / ``finalize_reservation``.
+
+    Primarily a test injection seam. When set, both ``run`` and
+    ``finalize_reservation`` skip the BrowserBackendPool entirely and use this
+    shared backend across all calls.
+    """
     global _DEFAULT_BACKEND
     _DEFAULT_BACKEND = backend
 
@@ -79,6 +92,43 @@ def _get_default_backend() -> BrowserBackend:
             raise RuntimeError(_BACKEND_NOT_CONFIGURED_ERROR)
         _DEFAULT_BACKEND = MockBrowserBackend()
     return _DEFAULT_BACKEND
+
+
+def _checkout_backend_for_flow() -> tuple[BrowserBackend, bool]:
+    """Acquire a backend for a new reservation flow.
+
+    Returns ``(backend, is_pooled)``. ``is_pooled=True`` means the caller is
+    responsible for pinning (multi-turn) or releasing (one-shot) via the pool;
+    ``is_pooled=False`` means the backend is a shared singleton (test default
+    or auto-created mock) and the caller does nothing on release.
+    """
+    if _DEFAULT_BACKEND is not None:
+        return _DEFAULT_BACKEND, False
+    from taste_agent.browser.pool import get_browser_pool
+
+    pool = get_browser_pool()
+    if pool is not None:
+        return pool.checkout(), True
+    return _get_default_backend(), False
+
+
+def _checkin_pooled_backend(backend: BrowserBackend) -> None:
+    """Return a pool-borrowed backend. No-op for non-pool backends."""
+    from taste_agent.browser.pool import get_browser_pool
+
+    pool = get_browser_pool()
+    if pool is not None and backend is not _DEFAULT_BACKEND:
+        pool.checkin(backend)
+
+
+@contextlib.contextmanager
+def _release_pinned_on_exit(pinned: BrowserBackend | None) -> Iterator[None]:
+    """Release ``pinned`` back to the browser pool on context exit, if pinned."""
+    try:
+        yield
+    finally:
+        if pinned is not None:
+            _checkin_pooled_backend(pinned)
 
 
 def _default_model_factory(model_id: str) -> BaseChatModel:
@@ -1132,24 +1182,43 @@ def run(
         return result
 
     try:
-        backend = _get_default_backend()
+        backend, is_pooled = _checkout_backend_for_flow()
     except RuntimeError as e:
         result = {"status": "failed", "error": str(e), "source": "configuration"}
         debug_exit("reserve_table.run", result=result)
         return result
 
-    result = _run_impl(
-        place_name=place_name,
-        reservation_url=reservation_url,
-        date=date,
-        time=time,
-        party_size=party_size,
-        contact_name=contact_name,
-        contact_phone=contact_phone,
-        backend=backend,
-        model_factory=_default_model_factory,
-        model_id=DEFAULT_MODEL_ID,
-    )
+    try:
+        result = _run_impl(
+            place_name=place_name,
+            reservation_url=reservation_url,
+            date=date,
+            time=time,
+            party_size=party_size,
+            contact_name=contact_name,
+            contact_phone=contact_phone,
+            backend=backend,
+            model_factory=_default_model_factory,
+            model_id=DEFAULT_MODEL_ID,
+        )
+    except Exception:
+        if is_pooled:
+            _checkin_pooled_backend(backend)
+        raise
+
+    # Pin the backend to this action_id only when it reached approval; the
+    # next turn's finalize_reservation/cancel_reservation will release it.
+    # Failure paths return the backend immediately so a pool slot doesn't leak.
+    if is_pooled:
+        if result.get("status") == "pending_approval":
+            action_id = str(result.get("action_id", ""))
+            if action_id:
+                _FLOW_BACKENDS[action_id] = backend
+            else:
+                _checkin_pooled_backend(backend)
+        else:
+            _checkin_pooled_backend(backend)
+
     debug_exit("reserve_table.run", result=result)
     return result
 
@@ -1172,19 +1241,23 @@ def discover_booking_flow(
         return result
 
     try:
-        backend = _get_default_backend()
+        backend, is_pooled = _checkout_backend_for_flow()
     except RuntimeError as e:
         result = {"status": "failed", "error": str(e), "source": "configuration"}
         debug_exit("reserve_table.discover_booking_flow", result=result)
         return result
 
-    result = _discover_impl(
-        place_name=place_name,
-        reservation_url=reservation_url,
-        backend=backend,
-        model_factory=_default_model_factory,
-        model_id=DEFAULT_MODEL_ID,
-    )
+    try:
+        result = _discover_impl(
+            place_name=place_name,
+            reservation_url=reservation_url,
+            backend=backend,
+            model_factory=_default_model_factory,
+            model_id=DEFAULT_MODEL_ID,
+        )
+    finally:
+        if is_pooled:
+            _checkin_pooled_backend(backend)
     debug_exit("reserve_table.discover_booking_flow", result=result)
     return result
 
@@ -1206,9 +1279,14 @@ def finalize_reservation(
         action_id=action_id,
         submit_selector=submit_selector,
     )
-    with trace("finalize_reservation", action_id=action_id):
+    # Prefer an explicit backend (test override), then the pinned backend from
+    # ``run()``, then the legacy default. The pinned slot is consumed
+    # unconditionally; ``_release_pinned_on_exit`` guarantees the pool slot is
+    # freed regardless of finalization outcome.
+    pinned: BrowserBackend | None = _FLOW_BACKENDS.pop(action_id, None) if backend is None else None
+    with trace("finalize_reservation", action_id=action_id), _release_pinned_on_exit(pinned):
         gate_action(action_id, tool_name="confirm_reservation")
-        bk = backend or _get_default_backend()
+        bk = backend or pinned or _get_default_backend()
         # Look up by id, not "latest pending" — concurrent registrations are
         # possible and the gate validated *this* id, so use *this* summary.
         approval = get(action_id)
@@ -1317,8 +1395,9 @@ def cancel_reservation(
         action_id=action_id,
         submit_selector=submit_selector,
     )
-    with trace("cancel_reservation", action_id=action_id):
-        bk = backend or _get_default_backend()
+    pinned: BrowserBackend | None = _FLOW_BACKENDS.pop(action_id, None) if backend is None else None
+    with trace("cancel_reservation", action_id=action_id), _release_pinned_on_exit(pinned):
+        bk = backend or pinned or _get_default_backend()
         bk.forbidden_selectors.discard(submit_selector)
         consume(action_id)
         logger.info("reservation cancelled: %s", action_id)

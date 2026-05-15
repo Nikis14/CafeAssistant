@@ -6,6 +6,7 @@ are visible to LangChain's auto-tracing.
 
 from __future__ import annotations
 
+import os
 import uuid
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ load_dotenv(Path(__file__).parent / ".env")
 import gradio as gr  # noqa: E402
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage  # noqa: E402
 
-from taste_agent.browser.backend import PlaywrightBrowserBackend  # noqa: E402
+from taste_agent.browser.pool import init_browser_pool  # noqa: E402
 from taste_agent.config import DEFAULT_MODEL_ID, MODEL_REGISTRY  # noqa: E402
 from taste_agent.logging_ import configure_logging, get_logger  # noqa: E402
 from taste_agent.memory import (  # noqa: E402
@@ -30,16 +31,15 @@ from taste_agent.memory import (  # noqa: E402
     set_session_id,
 )
 from taste_agent.orchestrator import run_turn  # noqa: E402
-from taste_agent.skills.reserve_table.reserve_table import set_default_backend  # noqa: E402
 
 configure_logging()
 logger = get_logger(__name__)
 
 try:
-    set_default_backend(PlaywrightBrowserBackend())
-    logger.info("configured Playwright browser backend")
+    _pool_size = int(os.getenv("TASTE_AGENT_BROWSER_POOL_SIZE", "3"))
+    init_browser_pool(size=_pool_size)
 except Exception as e:
-    logger.warning("browser backend not configured: %s", e)
+    logger.warning("browser pool not configured: %s; booking will be unavailable", e)
 
 _LABEL_TO_ID: dict[str, str] = {m.label: m.litellm_id for m in MODEL_REGISTRY}
 _MODEL_LABELS: list[str] = [m.label for m in MODEL_REGISTRY]
@@ -280,16 +280,17 @@ def send_message(
 ) -> tuple[Any, ...]:
     """Backward-compatible single-step send used by tests and non-UI callers."""
     staged = stage_user_message(user_msg, chat_history, conversations, active_id)
-    staged_history, staged_conversations, staged_active, radio_update, cleared = staged
+    staged_history, staged_conversations, staged_active, radio_update, cleared = staged  # noqa: RUF059
     if staged_history == chat_history and cleared == "":
         return staged
-    return complete_assistant_message(
+    msg = complete_assistant_message(
         staged_history,
         staged_conversations,
         staged_active,
         model_label,
         request,
-    ) + (cleared,)
+    )
+    return (*msg, cleared)
 
 
 def stage_user_message(
@@ -513,8 +514,13 @@ def build_ui() -> gr.Blocks:
 
 
 if __name__ == "__main__":
-    build_ui().launch(
-        server_name="127.0.0.1",
-        server_port=7860,
+    demo = build_ui()
+    demo.queue(
+        default_concurrency_limit=int(os.getenv("TASTE_AGENT_QUEUE_CONCURRENCY", "8")),
+        max_size=64,
+    )
+    demo.launch(
+        server_name=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
+        server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
         theme=gr.themes.Soft(),
     )

@@ -6,8 +6,10 @@ and the structured metadata (place, rating, date) alongside as Chroma
 
 Default embedding selection:
 
-- Production: HuggingFace ``sentence-transformers/all-MiniLM-L6-v2``. First
-  call downloads ~80MB to the local HF cache, then runs fully offline.
+- Production: ``sentence-transformers/all-MiniLM-L6-v2`` via ``fastembed``
+  (ONNX runtime, no torch). First call downloads ~80MB to a local cache, then
+  runs fully offline. Set ``FASTEMBED_CACHE_DIR`` to control the cache path
+  (Docker builds bake the model into the image at /opt/fastembed-cache).
 - Tests: a deterministic fake so the suite is fast and offline. Activated by
   setting ``TASTE_AGENT_FAKE_EMBEDDING=1`` — ``tests/conftest.py`` sets this
   at collection time.
@@ -24,29 +26,53 @@ import uuid
 from datetime import date as date_cls
 from typing import Any
 
+from langchain_core.embeddings import Embeddings
+
 from taste_agent.logging_ import get_logger, trace
 from taste_agent.memory.schemas import EpisodicEvent
 
 logger = get_logger(__name__)
 
 _FAKE_EMBEDDING_ENV = "TASTE_AGENT_FAKE_EMBEDDING"
+_FASTEMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+class _FastEmbedEmbeddings(Embeddings):
+    """LangChain ``Embeddings`` adapter around ``fastembed.TextEmbedding``.
+
+    ``fastembed`` runs the same MiniLM-L6-v2 model via ONNX runtime instead of
+    PyTorch — same output dimensionality (384), no torch / CUDA dependency.
+    """
+
+    def __init__(self, model_name: str = _FASTEMBED_MODEL_NAME) -> None:
+        # Lazy import keeps test collection cheap when FAKE_EMBEDDING=1.
+        from fastembed import TextEmbedding
+
+        kwargs: dict[str, Any] = {}
+        cache_dir = os.environ.get("FASTEMBED_CACHE_DIR")
+        if cache_dir:
+            kwargs["cache_dir"] = cache_dir
+        self._model = TextEmbedding(model_name=model_name, **kwargs)
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [vec.tolist() for vec in self._model.embed(texts)]
+
+    def embed_query(self, text: str) -> list[float]:
+        return next(iter(self._model.embed([text]))).tolist()
 
 
 def _default_embedding() -> Any:
     """Build the default embedding.
 
     Returns ``DeterministicFakeEmbedding`` when ``TASTE_AGENT_FAKE_EMBEDDING=1``
-    (tests / offline demos), otherwise HuggingFace sentence-transformers.
+    (tests / offline demos), otherwise fastembed running MiniLM-L6-v2 on ONNX.
     """
     if os.environ.get(_FAKE_EMBEDDING_ENV) == "1":
         from langchain_core.embeddings import DeterministicFakeEmbedding
 
         return DeterministicFakeEmbedding(size=64)
-    # Lazy import: HuggingFace is heavy and many tests never need it.
-    from langchain_huggingface import HuggingFaceEmbeddings
-
-    logger.info("loading HuggingFace embedding 'sentence-transformers/all-MiniLM-L6-v2'")
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    logger.info("loading fastembed model %r", _FASTEMBED_MODEL_NAME)
+    return _FastEmbedEmbeddings(_FASTEMBED_MODEL_NAME)
 
 
 class EpisodicMemory:

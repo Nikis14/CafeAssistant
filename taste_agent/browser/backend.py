@@ -17,6 +17,10 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
 
+from taste_agent.logging_ import get_logger
+
+logger = get_logger(__name__)
+
 
 class BrowserBackend(Protocol):
     """Minimal surface a browser-driving agent needs.
@@ -129,6 +133,8 @@ class PlaywrightBrowserBackend:
     def __init__(self, *, headless: bool = True) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.forbidden_selectors: set[str] = set()
+        # slot_id is set by BrowserBackendPool for log tagging when pooled.
+        self.slot_id: int | None = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="taste-browser")
         self._headless = headless
         self._executor.submit(self._init_playwright).result()
@@ -142,8 +148,22 @@ class PlaywrightBrowserBackend:
             ) from e
 
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(headless=self._headless)
-        self._page = self._browser.new_page()
+        # Chromium engages its process sandbox by default. Inside Docker this
+        # relies on unprivileged user namespaces (the chromium-headless-shell
+        # bundle does not ship the setuid chrome-sandbox helper). If the host
+        # kernel / runtime doesn't allow user namespaces, sandbox setup fails
+        # and the browser segfaults on launch — switch to the full chromium
+        # bundle (which ships chrome-sandbox setuid) before disabling sandbox.
+        # --disable-dev-shm-usage stays useful in containers (small /dev/shm)
+        # and is harmless elsewhere; the OS picks a tmpfs fallback transparently.
+        self._browser = self._pw.chromium.launch(
+            headless=self._headless,
+            args=["--disable-dev-shm-usage"],
+        )
+        # Explicit BrowserContext so reset_context() can dispose cookies +
+        # localStorage between pooled borrows without restarting Chromium.
+        self._context = self._browser.new_context()
+        self._page = self._context.new_page()
 
     def _run(self, fn, *args):
         return self._executor.submit(fn, *args).result()
@@ -152,9 +172,9 @@ class PlaywrightBrowserBackend:
         self._page.wait_for_load_state("load", timeout=5000)
         try:
             self._page.wait_for_load_state("networkidle", timeout=3000)
-        except Exception:
+        except Exception as e:
             # Some sites keep background requests open; best-effort settle only.
-            pass
+            logger.warning("Failed to wait for network idle: %s", str(e))
 
     def _first_visible_locator(self, selector: str):
         locator = self._page.locator(selector)
@@ -228,8 +248,24 @@ class PlaywrightBrowserBackend:
     def current_url(self) -> str:
         return self._run(lambda: self._page.url)
 
+    def reset_context(self) -> None:
+        """Dispose the current BrowserContext and create a fresh one.
+
+        Wipes cookies, localStorage, and any in-page state — the cheap way to
+        guarantee no session bleed between pooled borrows. Also drops any
+        per-flow forbidden_selectors registered by the action guardrail.
+        """
+        self._run(self._reset_context_impl)
+        self.forbidden_selectors.clear()
+        self.calls.clear()
+
+    def _reset_context_impl(self) -> None:
+        self._context.close()
+        self._context = self._browser.new_context()
+        self._page = self._context.new_page()
+
     def close(self) -> None:
-        self._run(self._page.close)
+        self._run(self._context.close)
         self._run(self._browser.close)
         self._run(self._pw.stop)
         self._executor.shutdown(wait=True)

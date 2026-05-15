@@ -85,6 +85,7 @@ def _reset_phase2_state():
     These are intentionally process-global for the demo. Tests must run from a
     clean slate or they leak state across each other.
     """
+    from taste_agent.browser import pool as _pool
     from taste_agent.browser.parser_cache import clear_cache
     from taste_agent.browser.spec_cache import clear_spec_cache
     from taste_agent.guardrails import reset_action_state
@@ -93,8 +94,11 @@ def _reset_phase2_state():
     reset_action_state()
     clear_cache()
     clear_spec_cache()
-    # Drop any backend set by a prior test
+    # Drop any backend / pool set by a prior test (e.g. via ``test_app.py``
+    # which imports ``app`` and triggers ``init_browser_pool`` at import).
     rt._DEFAULT_BACKEND = None
+    rt._FLOW_BACKENDS.clear()
+    _pool._BROWSER_POOL = None
 
     yield
 
@@ -102,6 +106,8 @@ def _reset_phase2_state():
     clear_cache()
     clear_spec_cache()
     rt._DEFAULT_BACKEND = None
+    rt._FLOW_BACKENDS.clear()
+    _pool._BROWSER_POOL = None
 
 
 @pytest.fixture(autouse=True)
