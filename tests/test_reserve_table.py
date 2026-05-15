@@ -9,13 +9,18 @@ the cancel path are all here.
 from __future__ import annotations
 
 import pytest
+from langchain_core.messages import AIMessage, ToolMessage
 
+import taste_agent.skills.reserve_table.reserve_table as _rt_module
 from taste_agent.browser.backend import MockBrowserBackend
 from taste_agent.browser.parser_cache import format_trace, has_trace, save_trace
 from taste_agent.browser.spec_cache import get_spec, save_spec
 from taste_agent.browser.specs import BookingFieldSpec, BookingFlowSpec, BookingFlowStep
-from taste_agent.browser.sub_agent import _trim_old_html_tool_messages, run_browser_subagent
-from taste_agent.browser.sub_agent import _ValueBoundFillBackend
+from taste_agent.browser.sub_agent import (
+    _trim_old_html_tool_messages,
+    _ValueBoundFillBackend,
+    run_browser_subagent,
+)
 from taste_agent.config import DEFAULT_MODEL_ID
 from taste_agent.guardrails.action import (
     approve,
@@ -31,9 +36,7 @@ from taste_agent.skills.reserve_table.reserve_table import (
     run,
     set_default_backend,
 )
-import taste_agent.skills.reserve_table.reserve_table as _rt_module
 from tests.fakes import FakeAgentModel
-from langchain_core.messages import AIMessage, ToolMessage
 
 
 def _factory(_id: str):
@@ -345,7 +348,10 @@ def test_run_impl_ignores_incomplete_cached_spec(monkeypatch):
         return {
             "messages": [],
             "last_message_text": "done",
-            "actions": [("navigate", {"url": url}), ("fill", {"selector": "input[name='name']", "value": "Ana"})],
+            "actions": [
+                ("navigate", {"url": url}),
+                ("fill", {"selector": "input[name='name']", "value": "Ana"}),
+            ],
             "action_id": action_id,
         }
 
@@ -486,11 +492,7 @@ def test_finalize_reservation_returns_rediscovery_payload_on_submit_failure(monk
             "actions": [("raw_html", {})],
             "final_url": "https://june-cafe.resos.com/booking",
             "final_dom": (
-                "<form>"
-                "<input name='email' />"
-                "<input name='phone' />"
-                "<input name='name' />"
-                "</form>"
+                "<form><input name='email' /><input name='phone' /><input name='name' /></form>"
             ),
         }
 

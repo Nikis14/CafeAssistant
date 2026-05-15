@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import types
 import sys
+import types
 
 from taste_agent.tools.place_web_fallback import (
     place_web_enrichment,
@@ -56,7 +56,7 @@ def test_place_web_enrichment_returns_normalized_candidates(monkeypatch):
         {"query": "nice restaurant with good coffee", "location": "Belgrade"}
     )
     assert len(seen_queries) == 3
-    assert any("best nice restaurant with good coffee in Belgrade" == q for q in seen_queries)
+    assert any(q == "best nice restaurant with good coffee in Belgrade" for q in seen_queries)
     assert len(result) == 1
     assert result[0]["name"] == "Cafe Moskva"
     assert result[0]["source"] == "web_enrichment"
@@ -191,7 +191,9 @@ def test_place_web_enrichment_uses_current_selected_model(monkeypatch):
             )
 
     monkeypatch.setattr(_mod, "_do_search", fake_search)
-    monkeypatch.setitem(sys.modules, "langchain_litellm", types.SimpleNamespace(ChatLiteLLM=_FakeChatLiteLLM))
+    monkeypatch.setitem(
+        sys.modules, "langchain_litellm", types.SimpleNamespace(ChatLiteLLM=_FakeChatLiteLLM)
+    )
 
     token = set_current_model_id("openai/gpt-5-mini")
     try:

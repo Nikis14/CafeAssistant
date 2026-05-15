@@ -32,10 +32,11 @@ branch can finalize anything.
 """
 
 from __future__ import annotations
-from collections.abc import Callable
-from datetime import datetime, timedelta
+
 import json
 import re
+from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import Any, Literal, TypedDict
 from zoneinfo import ZoneInfo
 
@@ -252,9 +253,7 @@ def _wrap_tool_for_turn(tool: Any) -> Any:
     )
 
 
-def _get_agent_parts(
-    model_id: str, factory: ModelFactory
-) -> tuple[Any, list[Any]]:
+def _get_agent_parts(model_id: str, factory: ModelFactory) -> tuple[Any, list[Any]]:
     """Return ``(llm, tools)`` for the given model + factory, cached.
 
     Cache key includes ``id(factory)`` so injecting a fake factory in tests
@@ -525,7 +524,13 @@ def _extract_known_booking_values(
                     known["party_size"] = normalized
                     break
 
-        if ":" in text or "o'clock" in lowered or " am" in lowered or " pm" in lowered or " at " in lowered:
+        if (
+            ":" in text
+            or "o'clock" in lowered
+            or " am" in lowered
+            or " pm" in lowered
+            or " at " in lowered
+        ):
             time_match = _TIME_RE.search(text)
             if time_match:
                 hour = int(time_match.group(1))
@@ -755,9 +760,7 @@ def agent_node(state: OrchestratorState) -> dict[str, Any]:
     all_msgs: list[BaseMessage] = result["messages"]
 
     final = all_msgs[-1]
-    response_text = (
-        _extract_text(final) if isinstance(final, AIMessage) else str(final.content)
-    )
+    response_text = _extract_text(final) if isinstance(final, AIMessage) else str(final.content)
     return {
         "facts": facts,
         "patterns_text": patterns_text,
@@ -801,9 +804,7 @@ def memory_gate_node(state: OrchestratorState) -> dict[str, Any]:
         )
         result = {
             "memory_gate": decision,
-            "memory_window_text": render_window_for_reflection(
-                decision.window_messages
-            ),
+            "memory_window_text": render_window_for_reflection(decision.window_messages),
         }
         debug_exit("memory_gate_node", result=result)
         return result
@@ -830,9 +831,7 @@ def reflection_node(state: OrchestratorState) -> dict[str, Any]:
             agent_response=clean_response,
             conversation_window=state.get("memory_window_text"),
             gate_reason=decision.reason if decision is not None else None,
-            allow_clarification=(
-                decision.allow_clarification if decision is not None else True
-            ),
+            allow_clarification=(decision.allow_clarification if decision is not None else True),
             model_factory=out_factory,
             model_id=state["model_id"],
             skip=state.get("skip_reflection"),
@@ -946,9 +945,7 @@ def format_agent_response_node(state: OrchestratorState) -> dict[str, Any]:
                 clarification_pii_redactions += n
             dropped = max(0, len(reflection.clarifications) - max_clarifications)
             quoted = "\n".join(f"- {q}" for q in cleaned_qs)
-            response_text = (
-                f"{response_text}\n\nBefore I forget — a quick question:\n{quoted}"
-            )
+            response_text = f"{response_text}\n\nBefore I forget — a quick question:\n{quoted}"
             if clarification_pii_redactions:
                 debug["clarification_pii_redactions"] = clarification_pii_redactions
             if dropped:

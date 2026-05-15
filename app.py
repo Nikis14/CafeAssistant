@@ -19,8 +19,8 @@ load_dotenv(Path(__file__).parent / ".env")
 import gradio as gr  # noqa: E402
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage  # noqa: E402
 
-from taste_agent.config import DEFAULT_MODEL_ID, MODEL_REGISTRY  # noqa: E402
 from taste_agent.browser.backend import PlaywrightBrowserBackend  # noqa: E402
+from taste_agent.config import DEFAULT_MODEL_ID, MODEL_REGISTRY  # noqa: E402
 from taste_agent.logging_ import configure_logging, get_logger  # noqa: E402
 from taste_agent.memory import (  # noqa: E402
     get_default_episodic,
@@ -243,10 +243,7 @@ def _conv_choices(
     """
     items = list(conversations.items())
     items.reverse()
-    return [
-        (f"{cid[:4]} · {_title_for(history)}", cid)
-        for cid, history in items
-    ]
+    return [(f"{cid[:4]} · {_title_for(history)}", cid) for cid, history in items]
 
 
 def create_new_conversation(
@@ -256,9 +253,9 @@ def create_new_conversation(
     new_id = _new_conversation_id()
     updated = {**conversations, new_id: []}
     return (
-        updated,                                         # conversations_state
-        new_id,                                          # active_conv_id
-        [],                                              # chatbot value (empty)
+        updated,  # conversations_state
+        new_id,  # active_conv_id
+        [],  # chatbot value (empty)
         gr.update(choices=_conv_choices(updated), value=new_id),  # conv_list radio
     )
 

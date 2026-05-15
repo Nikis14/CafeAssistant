@@ -11,9 +11,9 @@ orchestrator's job, gated by ``taste_agent.guardrails.action``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -51,9 +51,7 @@ logger = get_logger(__name__)
 # Default selector for the final submit button. Real Playwright + Phase 4 will
 # either rely on cached selectors or have the sub-agent report it explicitly.
 _DEFAULT_SUBMIT_SELECTOR = "button.confirm-reservation"
-_BACKEND_NOT_CONFIGURED_ERROR = (
-    "Browser automation is not configured for this environment."
-)
+_BACKEND_NOT_CONFIGURED_ERROR = "Browser automation is not configured for this environment."
 
 # Module-level backend default. The orchestrator (or tests) can swap it via
 # ``set_default_backend``. Single-process demo; Phase 3 will scope per session.
@@ -294,18 +292,20 @@ def _infer_flow_spec(
         )
 
     required_fields = [
-        fields_by_name[name]
-        for name in _REQUIRED_FIELD_ORDER
-        if name in fields_by_name
+        fields_by_name[name] for name in _REQUIRED_FIELD_ORDER if name in fields_by_name
     ]
     optional_fields = [
-        fields_by_name[name]
-        for name in sorted(_OPTIONAL_FIELDS)
-        if name in fields_by_name
+        fields_by_name[name] for name in sorted(_OPTIONAL_FIELDS) if name in fields_by_name
     ]
     is_prepare_ready = _has_prepare_ready_required_fields(required_fields)
     has_any_fields = bool(required_fields or optional_fields)
-    status = "ok" if is_prepare_ready else "partial_booking_flow" if has_any_fields else "no_online_booking"
+    status = (
+        "ok"
+        if is_prepare_ready
+        else "partial_booking_flow"
+        if has_any_fields
+        else "no_online_booking"
+    )
 
     return BookingFlowSpec(
         status=status,
@@ -366,13 +366,15 @@ def _spec_from_discovery(
     required_fields = [
         field for field in required_and_optional if field.name in _REQUIRED_FIELD_ORDER
     ]
-    optional_fields = [
-        field for field in required_and_optional if field.name in _OPTIONAL_FIELDS
-    ]
+    optional_fields = [field for field in required_and_optional if field.name in _OPTIONAL_FIELDS]
     is_prepare_ready = _has_prepare_ready_required_fields(required_fields)
     has_any_fields = bool(required_fields or optional_fields)
     return BookingFlowSpec(
-        status="ok" if is_prepare_ready else "partial_booking_flow" if has_any_fields else "no_online_booking",
+        status="ok"
+        if is_prepare_ready
+        else "partial_booking_flow"
+        if has_any_fields
+        else "no_online_booking",
         place_name=place_name,
         source_host=host_of(final_url or reservation_url),
         platform=_infer_platform(host_of(final_url or reservation_url)),
@@ -599,7 +601,7 @@ def _post_submit_still_looks_like_form(html: str, submit_selector: str) -> bool:
     form_markers = (
         "input name=",
         "textarea",
-        "type=\"submit\"",
+        'type="submit"',
         "type='submit'",
         "terms",
         "aria-invalid",
@@ -666,7 +668,11 @@ def _build_discovery_payload(
         if required_prompts:
             next_step += " Recovered fields: " + ", ".join(required_prompts) + "."
         if missing_required_prompts:
-            next_step += " Missing earlier required fields/steps: " + ", ".join(missing_required_prompts) + "."
+            next_step += (
+                " Missing earlier required fields/steps: "
+                + ", ".join(missing_required_prompts)
+                + "."
+            )
     elif flow_spec.status != "ok":
         next_step = (
             "No reliable online booking form was discovered. Offer to keep looking "
@@ -960,7 +966,11 @@ def _run_impl(
         backend.forbidden_selectors.add(_DEFAULT_SUBMIT_SELECTOR)
 
         cached_spec = get_spec(reservation_url)
-        if cached_spec is not None and cached_spec.status == "ok" and _has_prepare_ready_required_fields(cached_spec.required_fields):
+        if (
+            cached_spec is not None
+            and cached_spec.status == "ok"
+            and _has_prepare_ready_required_fields(cached_spec.required_fields)
+        ):
             return _prepare_from_spec(
                 flow_spec=cached_spec,
                 backend=backend,
@@ -972,7 +982,9 @@ def _run_impl(
                 contact_name=contact_name,
                 contact_phone=contact_phone,
             )
-        if cached_spec is not None and not _has_prepare_ready_required_fields(cached_spec.required_fields):
+        if cached_spec is not None and not _has_prepare_ready_required_fields(
+            cached_spec.required_fields
+        ):
             delete_spec(reservation_url)
 
         cached = get_trace(reservation_url)
@@ -1232,16 +1244,16 @@ def finalize_reservation(
                 post_submit_html = bk.raw_html()
             except Exception:
                 post_submit_html = ""
-            if not _post_submit_looks_successful(post_submit_html) and _post_submit_still_looks_like_form(
-                post_submit_html, effective_submit_selector
-            ):
+            if not _post_submit_looks_successful(
+                post_submit_html
+            ) and _post_submit_still_looks_like_form(post_submit_html, effective_submit_selector):
                 failure_reason = (
                     "submit click did not produce a recognizable confirmation state; "
                     "the page still looks like an unresolved booking form"
                 )
-            elif not _post_submit_looks_successful(post_submit_html) and _post_submit_still_looks_like_same_form(
-                pre_submit_html, post_submit_html
-            ):
+            elif not _post_submit_looks_successful(
+                post_submit_html
+            ) and _post_submit_still_looks_like_same_form(pre_submit_html, post_submit_html):
                 failure_reason = (
                     "submit click did not materially change the visible booking form; "
                     "the same required fields still appear after submission"

@@ -7,11 +7,10 @@ turn contains durable memory signal worth sending to the reflection agent.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-
 
 _SHORT_TRANSACTIONAL_RE = re.compile(
     r"^\s*(yes|no|ok|okay|sure|book it|reserve it|that one|this one|the first one|the second one|tomorrow|tonight|for \d+|we are \d+)\s*[.!?]?\s*$",
@@ -21,16 +20,12 @@ _TIME_RE = re.compile(
     r"\b(?:\d{1,2}:\d{2}\s*(?:am|pm)?|\d{1,2}\s*(?:am|pm)|tomorrow|tonight|today|next\s+\w+)\b",
     re.IGNORECASE,
 )
-_PARTY_SIZE_RE = re.compile(
-    r"\b(?:for|party of|table for|we are)\s+\d{1,2}\b", re.IGNORECASE
-)
+_PARTY_SIZE_RE = re.compile(r"\b(?:for|party of|table for|we are)\s+\d{1,2}\b", re.IGNORECASE)
 _CONTACT_RE = re.compile(
     r"\b(?:my name is|call me|phone|number is|email is|reach me at)\b",
     re.IGNORECASE,
 )
-_BOOKING_RE = re.compile(
-    r"\b(?:book|reserve|reservation|table|confirm|cancel)\b", re.IGNORECASE
-)
+_BOOKING_RE = re.compile(r"\b(?:book|reserve|reservation|table|confirm|cancel)\b", re.IGNORECASE)
 _REFERENTIAL_RE = re.compile(
     r"\b(?:the first one|the second one|that one|this one|it|there|same one)\b",
     re.IGNORECASE,

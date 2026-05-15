@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 
 from taste_agent.orchestrator import (
     _build_output_context,
@@ -20,7 +21,6 @@ from taste_agent.orchestrator import (
     reset_agent_cache,
 )
 from tests.fakes import FakeAgentModel
-from langchain_core.tools import StructuredTool
 
 # ── _extract_text ────────────────────────────────────────────────────────────
 
@@ -152,9 +152,7 @@ def test_wrap_tool_for_turn_blocks_duplicate_place_discovery_error_retries():
     def _fake_place_discovery(
         query: str, location: str = "Belgrade", max_results: int = 5
     ) -> list[dict[str, object]]:
-        calls.append(
-            {"query": query, "location": location, "max_results": max_results}
-        )
+        calls.append({"query": query, "location": location, "max_results": max_results})
         return [
             {
                 "name": "",
@@ -374,9 +372,7 @@ def test_clarifications_are_pii_redacted_before_appending():
     appended clarification block."""
     from taste_agent.orchestrator import format_agent_response_node
 
-    state = _make_format_state(
-        clarifications=["Should I email you at chef@iva.rs about this?"]
-    )
+    state = _make_format_state(clarifications=["Should I email you at chef@iva.rs about this?"])
     out = format_agent_response_node(state)
     assert "chef@iva.rs" not in out["response_text"]
     assert "[REDACTED-EMAIL]" in out["response_text"]

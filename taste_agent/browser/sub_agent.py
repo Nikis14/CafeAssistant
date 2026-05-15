@@ -13,17 +13,17 @@ submit is NOT in its tool belt — that's the deterministic confirm-gate's job.
 from __future__ import annotations
 
 from collections.abc import Callable
-from urllib.parse import urlparse
 from typing import Any
+from urllib.parse import urlparse
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import ModelRequest, ModelResponse
+from langchain.agents.middleware.types import ModelRequest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from taste_agent.browser.backend import BrowserBackend
-from taste_agent.config import DEFAULT_MODEL_ID
 from taste_agent.browser.tools import build_browser_tools, make_request_approval_tool
+from taste_agent.config import DEFAULT_MODEL_ID
 from taste_agent.logging_ import debug_enter, debug_exit, get_logger, trace
 from taste_agent.prompts import discovery_subagent_prompt, subagent_prompt
 

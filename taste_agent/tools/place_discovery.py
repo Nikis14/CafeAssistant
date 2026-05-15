@@ -7,8 +7,8 @@ results into one normalized candidate list.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypedDict
 
 from langchain_core.tools import tool
@@ -95,8 +95,22 @@ def _score_candidate(candidate: dict[str, Any], *, query: str) -> tuple[int, int
         score += 2
 
     lowered_query = query.lower()
-    if any(token in lowered_query for token in ("coffee", "cafe", "café", "espresso", "cappuccino", "roastery")):
-        if any(token in text for token in ("coffee", "cafe", "café", "espresso", "cappuccino", "roastery", "specialty")):
+    if any(
+        token in lowered_query
+        for token in ("coffee", "cafe", "café", "espresso", "cappuccino", "roastery")
+    ):
+        if any(
+            token in text
+            for token in (
+                "coffee",
+                "cafe",
+                "café",
+                "espresso",
+                "cappuccino",
+                "roastery",
+                "specialty",
+            )
+        ):
             score += 5
         if "hotel" in text:
             score -= 6
