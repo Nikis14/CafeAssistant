@@ -28,3 +28,11 @@ repos:
     -   id: trailing-whitespace
     -   id: check-added-large-files
         args: ['--maxkb=5000']
+
+-   repo: local
+    hooks:
+      - id: uv-export
+        name: Export requirements.txt from uv
+        entry: bash -c 'uv export --format requirements-txt --no-dev --no-hashes --output-file requirements.txt'
+        language: system
+        pass_filenames: false
