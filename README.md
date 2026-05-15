@@ -1,41 +1,65 @@
 # Taste Agent
 
-Personalized restaurant and café recommender + reservation agent. Final capstone for the AI Agents course (Seminar 7: System Design, Production & Deployment).
+Taste Agent is a restaurant and café assistant with two main jobs:
+- find relevant places using grounded search
+- help complete reservation flows through a browser-backed booking skill
 
-## Setup
+It runs as a Gradio app and keeps per-session memory about the user, such as durable preferences and past dining experiences.
 
-```
+## How It Works
+
+- `app.py`: Gradio UI, session handling, memory panels, model selection.
+- `taste_agent/orchestrator.py`: main LangGraph workflow for each turn.
+- `taste_agent/tools/`: grounded tools such as `place_discovery`, `memory_read`, `memory_search`, and booking-flow discovery.
+- `taste_agent/skills/reserve_table/`: reservation logic and final confirmation flow.
+- `taste_agent/browser/`: Playwright-backed browser tools and sub-agent support.
+- `taste_agent/memory/`: semantic, episodic, and procedural memory layers.
+- `taste_agent/prompts/`: system prompts for the main agent, browser agent, and reflection flows.
+
+## Turn Flow
+
+For a normal user message, the system goes through:
+
+1. input guardrail
+2. approval check for pending irreversible actions
+3. main agent execution
+4. output guardrail
+5. memory gating and reflection
+6. procedural pattern derivation when enough new memory exists
+7. final response formatting
+
+The main agent receives:
+- current conversation history
+- known semantic facts about the user
+- inferred behavioral patterns
+- known booking details already provided in the current conversation
+
+## Search And Booking
+
+- Place recommendations use `place_discovery`, which combines place search and web enrichment, then ranks merged candidates.
+- Reservations use `discover_booking_flow` plus `reserve_table`.
+- Final reservation submission is guarded by an explicit user confirmation step.
+
+## Run
+
+```bash
 cd production_system
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+playwright install chromium
 cp .env.example .env
-# Edit .env — at minimum set one provider key (ANTHROPIC_API_KEY recommended)
-```
-
-## Run
-
-```
 python app.py
 ```
 
-Open http://127.0.0.1:7860.
+Open `http://127.0.0.1:7860`.
+
+Set at least one model provider key in `.env`. For reservation automation, Playwright plus the Chromium browser binary must be installed in the environment.
 
 ## Development
 
-```
+```bash
+pytest tests/ -q
 ruff check .
 ruff format .
-pytest tests/ -v
 ```
-
-See `CLAUDE.md` for project conventions (logging, testing, style).
-See `docs/booking_flow_redesign.md` for the current reservation-flow architecture notes.
-
-## Phase status
-
-- [x] Phase 1 — Skeleton + happy path (input guardrail, orchestrator, mocked places_search, Gradio, hierarchical logger)
-- [ ] Phase 2 — Reservation flow with browser sub-agent (JSON DSL + confirm-gate)
-- [ ] Phase 3 — Memory layers (semantic + episodic)
-- [ ] Phase 4 — Remaining intents, real Foursquare, Tavily MCP web search, output guardrail
-- [ ] Phase 5 — Seminar notebook + lecture material
