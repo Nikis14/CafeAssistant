@@ -28,3 +28,5 @@ dist
 Dockerfile
 .dockerignore
 docker-compose.yml
+*.ipynb
+.ipynb_checkpoints
