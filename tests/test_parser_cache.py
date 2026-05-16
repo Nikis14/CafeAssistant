@@ -1,7 +1,5 @@
 """Tests for the in-memory parser cache."""
 
-from __future__ import annotations
-
 from taste_agent.browser.parser_cache import (
     get_trace,
     has_trace,

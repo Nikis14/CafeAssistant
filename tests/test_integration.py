@@ -6,8 +6,6 @@ This exercises: input guardrails, skill loader, agent wiring, orchestrator
 turn execution — without any network calls.
 """
 
-from __future__ import annotations
-
 import pytest
 from langchain_core.language_models import BaseChatModel
 

@@ -4,8 +4,6 @@ Used when the agent wants to recall past experiences ("the last time I was in
 Vienna I had a great schnitzel — where was it?").
 """
 
-from __future__ import annotations
-
 from langchain_core.tools import tool
 
 from taste_agent.logging_ import debug_enter, debug_exit, get_logger, trace

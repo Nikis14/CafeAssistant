@@ -6,8 +6,6 @@ directly via .invoke() with a hand-set collector, plus the run_reflection
 skip / model-factory-None paths.
 """
 
-from __future__ import annotations
-
 import pytest
 
 from taste_agent.memory import get_default_semantic

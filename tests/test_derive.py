@@ -1,7 +1,5 @@
 """Tests for memory/derive.py — pattern derivation + threshold trigger."""
 
-from __future__ import annotations
-
 import uuid
 
 from taste_agent.memory import (

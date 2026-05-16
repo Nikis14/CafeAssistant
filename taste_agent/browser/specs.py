@@ -8,8 +8,6 @@ action trace and are the foundation for splitting:
 2. booking-flow instantiation with user-provided values
 """
 
-from __future__ import annotations
-
 from pydantic import BaseModel, Field
 
 

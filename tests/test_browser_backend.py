@@ -1,7 +1,5 @@
 """Tests for the MockBrowserBackend."""
 
-from __future__ import annotations
-
 from taste_agent.browser.backend import MockBrowserBackend
 
 

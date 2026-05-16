@@ -1,7 +1,5 @@
 """Tests for the LangGraph-backed place_web_enrichment tool."""
 
-from __future__ import annotations
-
 import sys
 import types
 

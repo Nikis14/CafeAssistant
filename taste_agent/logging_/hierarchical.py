@@ -5,15 +5,15 @@ skill entry function, and non-trivial tool. Logs emitted inside the block are
 indented one level deeper, producing a console tree alongside LangSmith traces.
 """
 
-from __future__ import annotations
-
 import logging
+import os
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
 _DEFAULT_LOGGER_NAME = "taste_agent"
+_DEBUG_ENV_VAR = "TASTE_AGENT_DEBUG"
 
 # Tree-drawing characters (ASCII; CLAUDE.md forbids emoji)
 _INDENT = "   "
@@ -44,11 +44,18 @@ def get_logger(name: str | None = None) -> logging.Logger:
     return logging.getLogger(name or _DEFAULT_LOGGER_NAME)
 
 
-def configure_logging(level: int = logging.INFO) -> None:
+def _debug_enabled_from_env() -> bool:
+    value = os.getenv(_DEBUG_ENV_VAR, "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def configure_logging(level: int | None = None) -> None:
     """Wire the hierarchical formatter to stdout once. Idempotent."""
     root = logging.getLogger(_DEFAULT_LOGGER_NAME)
     if root.handlers:
         return
+    if level is None:
+        level = logging.DEBUG if _debug_enabled_from_env() else logging.INFO
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(HierarchicalFormatter())
     root.addHandler(handler)

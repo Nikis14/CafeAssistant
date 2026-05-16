@@ -1,7 +1,5 @@
 """Tool wrapper for booking-flow discovery."""
 
-from __future__ import annotations
-
 from langchain_core.tools import tool
 
 from taste_agent.logging_ import debug_enter, debug_exit

@@ -3,8 +3,6 @@
 Phase 4 swaps this for OSM Nominatim (free, no key) or Foursquare's geocoding.
 """
 
-from __future__ import annotations
-
 from langchain_core.tools import tool
 
 from taste_agent.config import ALLOW_RUNTIME_MOCKS

@@ -1,7 +1,5 @@
 """Tests for the input guardrail layer."""
 
-from __future__ import annotations
-
 import pytest
 
 from taste_agent.guardrails import run_input_guardrails

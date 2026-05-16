@@ -1,7 +1,5 @@
 """Tests for ProceduralMemory (SQLite-backed inferred patterns)."""
 
-from __future__ import annotations
-
 from datetime import datetime, timezone
 
 from taste_agent.memory import InferredPattern

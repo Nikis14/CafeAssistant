@@ -15,8 +15,6 @@ Behavior:
   Tavily's relevance score (0..1).
 """
 
-from __future__ import annotations
-
 import os
 from typing import Any
 

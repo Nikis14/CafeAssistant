@@ -1,7 +1,5 @@
 """Tests for the orchestrator's approval-flow handling (Phase 2)."""
 
-from __future__ import annotations
-
 import pytest
 
 from taste_agent.browser.backend import MockBrowserBackend

@@ -9,8 +9,6 @@ first run discovers the parser, later runs reuse it.
 Phase 2: in-memory only. Phase 4 persists to ``parsers_cache/<host>.json``.
 """
 
-from __future__ import annotations
-
 from urllib.parse import urlparse
 
 from taste_agent.logging_ import get_logger

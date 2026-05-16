@@ -1,7 +1,5 @@
 """Tests for the action guardrail — deterministic confirm-gate."""
 
-from __future__ import annotations
-
 import pytest
 
 from taste_agent.guardrails.action import (

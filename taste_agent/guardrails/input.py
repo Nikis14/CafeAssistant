@@ -5,8 +5,6 @@ scope check for an LLM judge and the injection check for a stronger classifier.
 The shape of the public function `run_input_guardrails` will stay stable.
 """
 
-from __future__ import annotations
-
 import re
 from dataclasses import dataclass
 

@@ -1,7 +1,5 @@
 """Tests for the hierarchical logger."""
 
-from __future__ import annotations
-
 from taste_agent.logging_ import get_logger, make_prefix, trace
 from taste_agent.logging_.hierarchical import current_depth
 

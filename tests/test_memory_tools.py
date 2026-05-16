@@ -1,7 +1,5 @@
 """Tests for the memory_read and memory_search tools."""
 
-from __future__ import annotations
-
 from taste_agent.memory import (
     EpisodicEvent,
     get_default_episodic,

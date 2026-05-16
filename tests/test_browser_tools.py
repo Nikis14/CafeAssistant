@@ -1,7 +1,5 @@
 """Tests for the browser tools factory + the request_user_approval tool."""
 
-from __future__ import annotations
-
 from taste_agent.browser.backend import MockBrowserBackend
 from taste_agent.browser.tools import (
     build_browser_tools,

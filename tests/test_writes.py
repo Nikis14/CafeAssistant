@@ -4,8 +4,6 @@ These primitives previously lived inside the (removed) memorize skill; the
 test coverage moves with them.
 """
 
-from __future__ import annotations
-
 from taste_agent.memory import SemanticMemory, get_default_semantic
 from taste_agent.memory.episodic import EpisodicMemory
 from taste_agent.memory.writes import write_episodic, write_semantic

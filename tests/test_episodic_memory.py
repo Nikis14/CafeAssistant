@@ -6,8 +6,6 @@ focus on the store's behavioral contract (write, count, search returns the
 right schema).
 """
 
-from __future__ import annotations
-
 from taste_agent.memory.episodic import EpisodicMemory
 from taste_agent.memory.schemas import EpisodicEvent
 

@@ -5,8 +5,6 @@ exists so Phase 4 can switch session ids per Gradio user / per LangGraph
 thread without touching every call site.
 """
 
-from __future__ import annotations
-
 from taste_agent.memory import (
     DEFAULT_SESSION_ID,
     current_session_id,

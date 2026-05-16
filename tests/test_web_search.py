@@ -3,8 +3,6 @@
 The Tavily API is never called in tests; ``_do_search`` is monkey-patched.
 """
 
-from __future__ import annotations
-
 import sys
 
 from taste_agent.tools.web_search import _ENV_KEY, web_search

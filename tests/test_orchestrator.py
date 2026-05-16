@@ -1,7 +1,5 @@
 """Tests for orchestrator internals: text extraction, tool-call counting, cache."""
 
-from __future__ import annotations
-
 from datetime import datetime
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage

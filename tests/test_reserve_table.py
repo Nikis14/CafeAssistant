@@ -6,8 +6,6 @@ Phase 4 when real Playwright is wired. The replay path, the action gate, and
 the cancel path are all here.
 """
 
-from __future__ import annotations
-
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 

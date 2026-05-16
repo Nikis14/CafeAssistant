@@ -1,7 +1,5 @@
 """Browser tools — atomic actions exposed to the sub-agent."""
 
-from __future__ import annotations
-
 from langchain_core.tools import StructuredTool, tool
 
 from taste_agent.browser.backend import BrowserBackend

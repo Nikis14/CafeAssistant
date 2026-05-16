@@ -4,8 +4,6 @@ The app module imports gradio + langchain at module load. We import lazily so
 that environments without gradio installed can still run the rest of the suite.
 """
 
-from __future__ import annotations
-
 import pytest
 
 pytest.importorskip("gradio")

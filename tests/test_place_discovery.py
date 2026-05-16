@@ -1,7 +1,5 @@
 """Tests for the merged parallel place discovery tool."""
 
-from __future__ import annotations
-
 import sys
 
 from taste_agent.tools.place_discovery import place_discovery, reset_graph_cache

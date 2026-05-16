@@ -19,8 +19,6 @@ Approval state is process-global for the demo (single-user Gradio session).
 Phase 3 will scope this per session when memory and multi-user concerns enter.
 """
 
-from __future__ import annotations
-
 import uuid
 from dataclasses import dataclass, field
 from typing import Any

@@ -6,8 +6,6 @@ that returns canned text responses without ever calling tools — enough to
 exercise the orchestrator's guardrail + invocation path end-to-end.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
@@ -41,7 +39,7 @@ class FakeAgentModel(BaseChatModel):
         msg = AIMessage(content=self.response)
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
-    def bind_tools(self, tools: Any, **kwargs: Any) -> FakeAgentModel:
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "FakeAgentModel":
         # No-op binding: the fake never decides to call a tool, it just replies.
         return self
 
@@ -87,5 +85,5 @@ class FakeToolCallingChatModel(BaseChatModel):
             msg = AIMessage(content="", tool_calls=list(next_response))
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
-    def bind_tools(self, tools: Any, **kwargs: Any) -> FakeToolCallingChatModel:
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "FakeToolCallingChatModel":
         return self

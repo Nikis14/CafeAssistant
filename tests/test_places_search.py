@@ -1,7 +1,5 @@
 """Tests for the places_search skill — mock + Foursquare backend."""
 
-from __future__ import annotations
-
 import json
 import sys
 from io import BytesIO

@@ -1,7 +1,5 @@
 """In-memory cache of discovered booking-flow specs, keyed by host."""
 
-from __future__ import annotations
-
 from taste_agent.browser.parser_cache import host_of
 from taste_agent.browser.specs import BookingFlowSpec
 from taste_agent.logging_ import get_logger

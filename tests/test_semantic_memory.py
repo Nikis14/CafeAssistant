@@ -1,7 +1,5 @@
 """Tests for SemanticMemory (SQLite key-value store)."""
 
-from __future__ import annotations
-
 from taste_agent.memory.semantic import SemanticMemory
 
 

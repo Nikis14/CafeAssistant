@@ -1,7 +1,5 @@
 """Tests for memory gating: reflection should run only on durable memory signal."""
 
-from __future__ import annotations
-
 from langchain_core.messages import AIMessage, HumanMessage
 
 from taste_agent.memory.gating import analyze_memory_relevance, render_window_for_reflection

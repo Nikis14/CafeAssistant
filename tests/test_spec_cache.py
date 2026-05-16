@@ -1,7 +1,5 @@
 """Tests for the in-memory booking flow spec cache."""
 
-from __future__ import annotations
-
 from taste_agent.browser.spec_cache import get_spec, has_spec, save_spec
 from taste_agent.browser.specs import BookingFieldSpec, BookingFlowSpec, BookingFlowStep
 
