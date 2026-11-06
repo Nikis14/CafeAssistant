@@ -110,7 +110,14 @@ class ProceduralMemory:
                     INSERT INTO patterns(text, confidence, evidence_count, derived_at)
                     VALUES (?, ?, ?, ?)
                     """,
-                    (p.text, p.confidence, p.evidence_count, p.derived_at or now),
+                    (
+                        p.text,
+                        p.confidence,
+                        p.evidence_count,
+                        # Explicit ISO string: sqlite3's implicit datetime adapter
+                        # is deprecated since Python 3.12.
+                        p.derived_at.isoformat() if p.derived_at else now,
+                    ),
                 )
             self._conn.commit()
             logger.info("procedural patterns replaced: %d row(s)", len(patterns))
