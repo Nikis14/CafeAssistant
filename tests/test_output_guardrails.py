@@ -29,9 +29,7 @@ def test_redact_pii_strips_phone():
 
 
 def test_redact_pii_does_not_strip_iso_date_as_phone():
-    cleaned, n, concerns = redact_output_pii(
-        "Prepared for 2026-05-15 at 12:00 for 2 people."
-    )
+    cleaned, n, concerns = redact_output_pii("Prepared for 2026-05-15 at 12:00 for 2 people.")
     assert cleaned == "Prepared for 2026-05-15 at 12:00 for 2 people."
     assert n == 0
     assert concerns == []
@@ -53,9 +51,7 @@ def test_redact_pii_strips_leaked_input_tokens():
 
 
 def test_redact_pii_multiple_kinds():
-    cleaned, n, _concerns = redact_output_pii(
-        "Email a@b.com or call +381 64 123 4567"
-    )
+    cleaned, n, _concerns = redact_output_pii("Email a@b.com or call +381 64 123 4567")
     assert n == 2
     assert "[REDACTED-EMAIL]" in cleaned
     assert "[REDACTED-PHONE]" in cleaned
@@ -71,7 +67,7 @@ def test_redact_pii_clean_text_unchanged():
 
 def test_rewrite_internal_error_leaks_drops_provider_details():
     text = (
-        "The live Places search chunk is returning an authorization error, so I can’t pull "
+        "The live Places search chunk is returning an authorization error, so I can't pull "
         "up live options right now. I can still help with web-based picks."
     )
     cleaned, rewritten, concerns = rewrite_internal_error_leaks(text)
@@ -124,9 +120,7 @@ def test_parse_judge_output_raises_on_no_json():
 
 def test_skip_judge_runs_pii_only():
     """skip_judge=True is the cheap path. PII still gets stripped."""
-    result = run_output_guardrails(
-        "Email chef@iva.rs", skip_judge=True
-    )
+    result = run_output_guardrails("Email chef@iva.rs", skip_judge=True)
     assert result.judge_skipped is True
     assert "[REDACTED-EMAIL]" in result.response_text
     assert result.pii_leaked == 1
@@ -190,9 +184,7 @@ def test_judge_passes_through_citation_concerns():
 def test_judge_parse_failure_does_not_raise():
     """A malformed judge response must not crash the turn."""
     factory = _judge_factory("definitely not json")
-    result = run_output_guardrails(
-        "Try Iva.", model_factory=factory, skip_judge=False
-    )
+    result = run_output_guardrails("Try Iva.", model_factory=factory, skip_judge=False)
     assert result.judge_skipped is False
     assert result.judge_error is not None
     # PII redaction still happened (or, in this case, wasn't needed)
@@ -231,9 +223,7 @@ def test_judge_rejects_string_booleans():
     factory = _judge_factory(
         '{"factuality_ok": "false", "factuality_concerns": ["x"], "citation_ok": true, "citation_concerns": []}'
     )
-    result = run_output_guardrails(
-        "Try Iva.", model_factory=factory, skip_judge=False
-    )
+    result = run_output_guardrails("Try Iva.", model_factory=factory, skip_judge=False)
     # Validation failed → judge_error is set, defaults are kept (factuality_ok=True)
     assert result.judge_skipped is False
     assert result.judge_error is not None
@@ -244,9 +234,7 @@ def test_judge_rejects_non_list_concerns():
     factory = _judge_factory(
         '{"factuality_ok": false, "factuality_concerns": "single string not list", "citation_ok": true, "citation_concerns": []}'
     )
-    result = run_output_guardrails(
-        "Try Iva.", model_factory=factory, skip_judge=False
-    )
+    result = run_output_guardrails("Try Iva.", model_factory=factory, skip_judge=False)
     assert result.judge_error is not None
 
 
@@ -254,9 +242,7 @@ def test_judge_accepts_well_formed_payload():
     factory = _judge_factory(
         '{"factuality_ok": false, "factuality_concerns": ["fabricated place"], "citation_ok": true, "citation_concerns": []}'
     )
-    result = run_output_guardrails(
-        "Try Atlantis.", model_factory=factory, skip_judge=False
-    )
+    result = run_output_guardrails("Try Atlantis.", model_factory=factory, skip_judge=False)
     assert result.judge_error is None
     assert result.factuality_ok is False
     assert "fabricated place" in result.factuality_concerns

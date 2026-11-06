@@ -41,6 +41,8 @@ def _factory(_id: str):
         "proceed",
         "Go ahead, confirm",
         "sure",
+        "да",
+        "Да, подтверждаю",
     ],
 )
 def test_detect_approval_intent_approve(text):
@@ -49,7 +51,7 @@ def test_detect_approval_intent_approve(text):
 
 @pytest.mark.parametrize(
     "text",
-    ["no", "cancel", "stop", "Nope, don't", "abort"],
+    ["no", "cancel", "stop", "Nope, don't", "abort", "нет", "Отмена"],
 )
 def test_detect_approval_intent_cancel(text):
     assert _detect_approval_intent(text) == "cancel"
@@ -208,9 +210,7 @@ def test_bare_approval_reply_survives_input_guardrail(reply):
     set_default_backend(MockBrowserBackend())
     aid = register_pending("confirm_reservation", "Reserve at X")
 
-    _, debug = run_turn(
-        reply, history=[], model_id="fake/x", model_factory=_factory
-    )
+    _, debug = run_turn(reply, history=[], model_id="fake/x", model_factory=_factory)
     # Input guardrail did not refuse — the approval branch handled the turn
     assert debug.get("refused") is False
     assert debug.get("approval_action") in {"confirmed", "cancelled"}

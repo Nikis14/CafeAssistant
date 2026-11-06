@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main, ru-seminar]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    env:
+      # Unit tests never call a real model: LLMs and external APIs are mocked.
+      LANGSMITH_TRACING: "false"
+      TASTE_AGENT_FAKE_EMBEDDING: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (from uv.lock)
+        run: uv sync --locked --group dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Unit tests
+        run: uv run pytest -q

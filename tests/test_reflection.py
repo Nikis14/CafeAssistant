@@ -36,9 +36,7 @@ def collector():
 
 
 def test_memorize_semantic_writes_and_collects(collector):
-    out = memorize_semantic.invoke(
-        {"key": "dietary", "value": "vegetarian", "source": "explicit"}
-    )
+    out = memorize_semantic.invoke({"key": "dietary", "value": "vegetarian", "source": "explicit"})
     assert "written" in out
     assert len(collector.semantic_writes) == 1
     assert collector.semantic_writes[0]["key"] == "dietary"
@@ -49,9 +47,7 @@ def test_memorize_semantic_writes_and_collects(collector):
 
 def test_memorize_semantic_conflict_collected_not_written(collector):
     get_default_semantic().write("dietary", "vegetarian", source="explicit")
-    out = memorize_semantic.invoke(
-        {"key": "dietary", "value": "vegan", "source": "explicit"}
-    )
+    out = memorize_semantic.invoke({"key": "dietary", "value": "vegan", "source": "explicit"})
     assert "conflict" in out
     assert len(collector.semantic_conflicts) == 1
     assert collector.semantic_conflicts[0]["existing_value"] == "vegetarian"
@@ -99,9 +95,7 @@ def test_memorize_episodic_invalid_rating_reports_error(collector):
 
 def test_request_clarification_queues_question(collector):
     memorize_semantic.invoke({"key": "k", "value": "v"})  # bump tool_calls
-    out = request_clarification.invoke(
-        {"question": "Should I remember you prefer X generally?"}
-    )
+    out = request_clarification.invoke({"question": "Should I remember you prefer X generally?"})
     assert "queued" in out
     assert len(collector.clarifications) == 1
     assert "prefer X" in collector.clarifications[0]
@@ -208,9 +202,7 @@ def test_run_reflection_request_clarification_collected(monkeypatch):
                 [
                     {
                         "name": "request_clarification",
-                        "args": {
-                            "question": "Should I update your dietary preference?"
-                        },
+                        "args": {"question": "Should I update your dietary preference?"},
                         "id": "call_1",
                     }
                 ],

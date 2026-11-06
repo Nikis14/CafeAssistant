@@ -65,8 +65,7 @@ def _format_semantic_block(sem: SemanticMemory) -> str:
     if not facts:
         return "(no semantic facts)"
     return "\n".join(
-        f"- {f.key}={f.value} (source={f.source}, confidence={f.confidence:.2f})"
-        for f in facts
+        f"- {f.key}={f.value} (source={f.source}, confidence={f.confidence:.2f})" for f in facts
     )
 
 

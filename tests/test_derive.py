@@ -98,9 +98,7 @@ def test_derive_patterns_parse_failure_returns_none():
 def test_derive_patterns_schema_drift_returns_none():
     """Coerced types (e.g. confidence as string) -> validation failure -> None."""
     sem, epi, _ = _new_stores()
-    factory = _factory(
-        '{"patterns": [{"text": "x", "confidence": "high", "evidence_count": 3}]}'
-    )
+    factory = _factory('{"patterns": [{"text": "x", "confidence": "high", "evidence_count": 3}]}')
     patterns = derive_patterns(semantic=sem, episodic=epi, model_factory=factory)
     assert patterns is None
 
@@ -159,9 +157,7 @@ def test_maybe_derive_idempotent_after_recent_run():
     sem, epi, proc = _new_stores()
     for i in range(5):
         epi.log(EpisodicEvent(place_name=f"P{i}", notes=f"visit {i}"))
-    factory = _factory(
-        '{"patterns": [{"text": "x", "confidence": 0.5, "evidence_count": 2}]}'
-    )
+    factory = _factory('{"patterns": [{"text": "x", "confidence": 0.5, "evidence_count": 2}]}')
     ran1 = maybe_derive_procedural(
         model_factory=factory,
         episode_threshold=5,
@@ -189,9 +185,7 @@ def test_maybe_derive_failure_preserves_existing_patterns():
 
     sem, epi, proc = _new_stores()
     # Seed existing patterns from a prior derivation
-    proc.replace_all(
-        [InferredPattern(text="prior pattern", confidence=0.9, evidence_count=5)]
-    )
+    proc.replace_all([InferredPattern(text="prior pattern", confidence=0.9, evidence_count=5)])
     proc.set_last_derive_episode_count(3)
     # Add enough new episodes to cross the threshold
     for i in range(5):
@@ -221,9 +215,7 @@ def test_maybe_derive_success_with_empty_patterns_advances_and_clears():
     from taste_agent.memory.schemas import InferredPattern
 
     sem, epi, proc = _new_stores()
-    proc.replace_all(
-        [InferredPattern(text="stale", confidence=0.7, evidence_count=2)]
-    )
+    proc.replace_all([InferredPattern(text="stale", confidence=0.7, evidence_count=2)])
     # Last derive at 0; add 5 episodes → delta crosses threshold
     proc.set_last_derive_episode_count(0)
     for i in range(5):

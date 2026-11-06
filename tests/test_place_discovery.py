@@ -81,7 +81,7 @@ def test_place_discovery_returns_web_when_places_fail(monkeypatch):
 
     class _EnrichmentTool:
         @staticmethod
-        def invoke(payload):
+        def invoke(_payload):
             return [
                 {
                     "name": "Sonder Roastery",
@@ -126,7 +126,7 @@ def test_place_discovery_preserves_both_error_paths(monkeypatch):
 
     class _EnrichmentTool:
         @staticmethod
-        def invoke(payload):
+        def invoke(_payload):
             return [
                 {
                     "name": "",
@@ -206,7 +206,7 @@ def test_place_discovery_ranks_relevant_coffee_places_above_hotels(monkeypatch):
 
     class _EnrichmentTool:
         @staticmethod
-        def invoke(payload):
+        def invoke(_payload):
             return [
                 {
                     "name": "Specialty Roastery",

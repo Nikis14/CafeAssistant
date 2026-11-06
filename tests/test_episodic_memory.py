@@ -114,9 +114,7 @@ def test_list_recent_returns_events_in_date_descending_order():
 def test_list_recent_respects_k():
     store = _new_store()
     for i in range(5):
-        store.log(
-            EpisodicEvent(place_name=f"Place {i}", notes="x", date=f"2026-01-0{i + 1}")
-        )
+        store.log(EpisodicEvent(place_name=f"Place {i}", notes="x", date=f"2026-01-0{i + 1}"))
     assert len(store.list_recent(k=3)) == 3
 
 

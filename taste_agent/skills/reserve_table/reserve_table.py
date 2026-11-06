@@ -66,14 +66,6 @@ _DEFAULT_BACKEND: BrowserBackend | None = None
 _FLOW_BACKENDS: dict[str, BrowserBackend] = {}
 
 
-def _chat_model_kwargs(model_id: str) -> dict[str, Any]:
-    """Return LiteLLM kwargs that are compatible with the target model."""
-    normalized = model_id.lower()
-    if normalized.startswith("openai/gpt-5"):
-        return {}
-    return {"temperature": 0.2}
-
-
 def set_default_backend(backend: BrowserBackend) -> None:
     """Override the module-level backend used by ``run`` / ``finalize_reservation``.
 
@@ -132,10 +124,10 @@ def _release_pinned_on_exit(pinned: BrowserBackend | None) -> Iterator[None]:
 
 
 def _default_model_factory(model_id: str) -> BaseChatModel:
-    """Same lazy-LiteLLM factory pattern as the main orchestrator."""
-    from langchain_litellm import ChatLiteLLM
+    """Same lazy factory pattern as the main orchestrator."""
+    from taste_agent.llm import get_model
 
-    return ChatLiteLLM(model=model_id, **_chat_model_kwargs(model_id))
+    return get_model(model_id)
 
 
 def _format_goal(

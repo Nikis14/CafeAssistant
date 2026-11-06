@@ -21,9 +21,9 @@ Taste Agent is a personalized restaurant/café recommender + reservation agent. 
 
 **Memory layers**: thread (Gradio `gr.State`, per browser session), semantic (SQLite key-value, what the user explicitly stated), episodic (Chroma vector store, dining experiences), procedural (SQLite, behavioral patterns inferred every ~5 episodes). All four are scoped per session via a ContextVar.
 
-**Per-turn cost**: with default settings, one user turn invokes ~3 LLM calls — the main agent, the output-guardrail judge (`TASTE_AGENT_SKIP_OUTPUT_JUDGE=1` to disable), and the reflection sub-agent that auto-updates memory (`TASTE_AGENT_SKIP_REFLECTION=1` to disable). Procedural derivation adds an occasional call (~0.2 amortized at the 5-episode threshold). Tests set both skip-flags via `conftest.py` so the suite costs nothing.
+**Per-turn cost**: with default settings one user turn is only the main agent loop (~2–4 LLM calls). The output-guardrail judge runs only when `TASTE_AGENT_JUDGE_MODEL_ID` is set; the reflection sub-agent only when `TASTE_AGENT_SKIP_REFLECTION=0`. Procedural derivation adds an occasional call (~0.2 amortized at the 5-episode threshold). Tests set both skip-flags via `conftest.py` so the suite costs nothing.
 
-**Stack**: LangGraph + LangChain, LiteLLM for provider switching (Claude / GPT-5 family / Gemini / Mistral), LangSmith for tracing, Gradio for UI, Playwright for browser, Tavily MCP for web search.
+**Stack**: LangGraph + LangChain, `taste_agent/llm.py` model layer (`ChatOpenAI` for NeuralDeep / OpenAI + LiteLLM Router as in-process gateway), LangSmith for tracing, Gradio for UI, Playwright for browser, Tavily MCP for web search.
 
 **Deployment target**: localhost only for now. Cloud Run is handled separately.
 

@@ -62,9 +62,7 @@ class ReflectionResult:
 # ContextVar so each run_reflection invocation gets its own isolated collector.
 # Tools resolve this at call time. No globals, no cross-talk between concurrent
 # reflections (which can happen if two Gradio sessions overlap).
-_collector: ContextVar[ReflectionResult | None] = ContextVar(
-    "reflection_collector", default=None
-)
+_collector: ContextVar[ReflectionResult | None] = ContextVar("reflection_collector", default=None)
 
 
 def _get_collector() -> ReflectionResult:
@@ -139,9 +137,7 @@ def memorize_episodic(
     coll = _get_collector()
     coll.tool_calls += 1
     if result.get("written"):
-        coll.episodic_writes.append(
-            {"place_name": place_name, "doc_id": result["doc_id"]}
-        )
+        coll.episodic_writes.append({"place_name": place_name, "doc_id": result["doc_id"]})
         return f"logged episodic: {place_name}"
     return f"error: {result.get('error', 'unknown')}"
 
@@ -193,7 +189,9 @@ def run_reflection(
     collector = ReflectionResult()
 
     if skip is None:
-        skip = os.environ.get(_REFLECTION_SKIP_ENV) == "1"
+        # Off unless explicitly enabled: reflection is an extra LLM call per
+        # turn, which the free-tier rate limit can't afford.
+        skip = os.environ.get(_REFLECTION_SKIP_ENV, "1") == "1"
     if skip or model_factory is None:
         collector.skipped = True
         return collector

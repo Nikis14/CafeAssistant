@@ -15,6 +15,23 @@ It runs as a Gradio app and keeps per-session memory about the user, such as dur
 - `taste_agent/browser/`: Playwright-backed browser tools and sub-agent support.
 - `taste_agent/memory/`: semantic, episodic, and procedural memory layers.
 - `taste_agent/prompts/`: system prompts for the main agent, browser agent, and reflection flows.
+- `taste_agent/llm.py`: model layer — NeuralDeep / OpenAI via `ChatOpenAI` with a shared rate limiter, plus a LiteLLM Router "gateway" (several keys + OpenAI fallback).
+- `taste_agent/guardrails/`: input (PII, injection, scope), output (PII/secret leaks, optional LLM judge), action (deterministic approval gate).
+- `.github/workflows/ci.yml`: ruff + pytest on every push (all LLM calls mocked).
+
+## Models
+
+| Model id | What it is |
+|---|---|
+| `neuraldeep/qwen3.6-35b-a3b-noreason` | Default. Free tier: 20 requests/min per key |
+| `gateway` | LiteLLM Router over every `NEURAL_DEEP_API_KEY*` key, falls back to `openai/gpt-5-nano` if `OPENAI_API_KEY` is set |
+| `openai/gpt-5-nano` | OpenAI directly |
+
+Memory reflection and the output LLM judge are off by default to keep one turn at ~2–4 model calls.
+
+## Observability
+
+With `LANGSMITH_TRACING=true` every turn is one LangSmith trace named `taste_agent_turn` with metadata `session_id`, `model_id`, `prompt_version` (hash of `prompts/orchestrator.txt`). Thumbs up/down in the chat is stored as `user_score` feedback on that trace.
 
 ## Turn Flow
 
@@ -45,14 +62,13 @@ The main agent receives:
 ```bash
 cd production_system
 cp .env.example .env
-uv sync --extra dev
-uv run playwright install chromium
+uv sync --group dev
 uv run python app.py
 ```
 
-Open `http://127.0.0.1:7860`.
+Open `http://127.0.0.1:7860`. Docker: `docker compose up --build`.
 
-Set at least one model provider key in `.env`. For reservation automation, Playwright plus the Chromium browser binary must be installed in the environment.
+Set `NEURAL_DEEP_API_KEY` in `.env`. Without Foursquare / Tavily keys keep `TASTE_AGENT_ALLOW_RUNTIME_MOCKS=1`. For real reservation automation run `uv run playwright install chromium`.
 
 ## Development
 

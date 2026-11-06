@@ -40,7 +40,9 @@ def test_mixed_booking_turn_with_preference_still_reflects():
 
 def test_reply_to_memory_clarification_triggers_reflection():
     history = [
-        AIMessage(content="Before I forget — a quick question: Should I remember that you generally prefer quiet cafes?"),
+        AIMessage(
+            content="Before I forget — a quick question: Should I remember that you generally prefer quiet cafes?"
+        ),
     ]
 
     decision = analyze_memory_relevance(

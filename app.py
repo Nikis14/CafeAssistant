@@ -41,10 +41,10 @@ try:
 except Exception as e:
     logger.warning("browser pool not configured: %s; booking will be unavailable", e)
 
-_LABEL_TO_ID: dict[str, str] = {m.label: m.litellm_id for m in MODEL_REGISTRY}
+_LABEL_TO_ID: dict[str, str] = {m.label: m.model_id for m in MODEL_REGISTRY}
 _MODEL_LABELS: list[str] = [m.label for m in MODEL_REGISTRY]
 _DEFAULT_LABEL: str = next(
-    (m.label for m in MODEL_REGISTRY if m.litellm_id == DEFAULT_MODEL_ID),
+    (m.label for m in MODEL_REGISTRY if m.model_id == DEFAULT_MODEL_ID),
     _MODEL_LABELS[0],
 )
 
@@ -53,6 +53,11 @@ _DEFAULT_LABEL: str = next(
 # (``n_facts_in_prompt``) without threading them through Gradio's return shape.
 # Per-session so two browser tabs don't see each other's stats.
 _LAST_DEBUG_BY_SESSION: dict[str, dict[str, Any]] = {}
+
+# (session_hash, conversation_id, message_index) -> LangSmith run id of the turn
+# that produced that assistant message. Lets a thumbs up/down in the chat
+# land as feedback on the exact trace.
+_RUN_IDS: dict[tuple[str, str, int], str] = {}
 
 
 def _session_id_of(request: gr.Request | None) -> str:
@@ -362,12 +367,35 @@ def complete_assistant_message(
         {"role": "assistant", "content": response},
     ]
     updated_conversations = {**conversations, active_id: history_with_reply}
+    run_id = _LAST_DEBUG_BY_SESSION.get(_session_id_of(request), {}).get("run_id")
+    if run_id:
+        _RUN_IDS[(_session_id_of(request), active_id, len(history_with_reply) - 1)] = run_id
     return (
         history_with_reply,
         updated_conversations,
         active_id,
         gr.update(choices=_conv_choices(updated_conversations), value=active_id),
     )
+
+
+def record_feedback(
+    data: gr.LikeData,
+    active_id: str | None,
+    request: gr.Request | None = None,
+) -> None:
+    """Send a thumbs up/down from the chat to LangSmith as ``user_score`` on the turn's trace."""
+    index = data.index[0] if isinstance(data.index, (list, tuple)) else data.index
+    run_id = _RUN_IDS.get((_session_id_of(request), active_id or "", int(index)))
+    if run_id is None:
+        logger.warning("feedback for unknown message index=%s", index)
+        return
+    try:
+        from langsmith import Client
+
+        Client().create_feedback(run_id, key="user_score", score=1 if data.liked else 0)
+        logger.info("feedback run_id=%s liked=%s", run_id, data.liked)
+    except Exception as e:
+        logger.warning("feedback not sent: %s", e)
 
 
 # ── UI assembly ─────────────────────────────────────────────────────────────
@@ -380,7 +408,8 @@ def build_ui() -> gr.Blocks:
         gr.Markdown(
             "# Taste Agent\n"
             "Personalized restaurant & café recommender for Belgrade and beyond. "
-            "Pick a model, start a new chat, or pick a past one from the sidebar."
+            "Pick a model, start a new chat, or pick a past one from the sidebar. "
+            "Rate answers with thumbs up/down: the rating is attached to the LangSmith trace."
         )
         model_dropdown = gr.Dropdown(
             choices=_MODEL_LABELS,
@@ -503,6 +532,8 @@ def build_ui() -> gr.Blocks:
             outputs=[chatbot, conversations_state, active_conv_state, conv_list],
         )
 
+        chatbot.like(fn=record_feedback, inputs=[active_conv_state], outputs=None)
+
         # Auto-refresh memory panels on every chatbot change (i.e., after each
         # turn or conversation switch). Live "memory grows as you talk" beat.
         chatbot.change(
@@ -523,4 +554,5 @@ if __name__ == "__main__":
         server_name=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
         server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
         theme=gr.themes.Soft(),
+        share=os.getenv("GRADIO_SHARE") == "1",
     )

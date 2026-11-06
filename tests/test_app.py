@@ -400,7 +400,9 @@ def test_stage_user_message_appends_immediately():
 
 
 def test_complete_assistant_message_uses_last_user_turn(monkeypatch):
-    monkeypatch.setattr("app.chat_fn", lambda message, history, *_a, **_kw: f"reply:{message}:{len(history)}")
+    monkeypatch.setattr(
+        "app.chat_fn", lambda message, history, *_a, **_kw: f"reply:{message}:{len(history)}"
+    )
 
     from app import complete_assistant_message
 

@@ -7,7 +7,6 @@ from langchain_core.tools import StructuredTool
 
 from taste_agent.orchestrator import (
     _build_output_context,
-    _chat_model_kwargs,
     _count_tool_calls,
     _extract_known_booking_values,
     _extract_text,
@@ -289,12 +288,6 @@ def test_format_note_empty_when_no_concerns():
     from taste_agent.guardrails.output import OutputGuardrailResult
 
     assert _format_output_note(OutputGuardrailResult(response_text="ok")) == ""
-
-
-def test_chat_model_kwargs_omit_temperature_for_gpt5():
-    assert _chat_model_kwargs("openai/gpt-5") == {}
-    assert _chat_model_kwargs("openai/gpt-5-mini") == {}
-    assert _chat_model_kwargs("mistral/mistral-small-latest") == {"temperature": 0.2}
 
 
 def test_extract_known_booking_values_accumulates_prior_user_details():

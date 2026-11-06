@@ -226,9 +226,7 @@ def _score(query: str, place: PlaceFixture) -> int:
     return sum(1 for tag in place["tags"] if tag in q)
 
 
-def _mock_search(
-    query: str, location: str, max_results: int
-) -> list[dict[str, object]]:
+def _mock_search(query: str, location: str, max_results: int) -> list[dict[str, object]]:
     logger.debug("mock places search: query=%r location=%r", query, location)
     scored: list[tuple[int, PlaceFixture]] = [(_score(query, p), p) for p in _MOCK_DATA]
     generic = any(w in query.lower() for w in ("place", "where", "somewhere"))
@@ -287,9 +285,7 @@ def run(query: str, location: str = "Belgrade", max_results: int = 5) -> list[di
             # results.
             try:
                 results = _foursquare_search(query, location, max_results, api_key)
-                logger.info(
-                    "places_search via Foursquare returned %d result(s)", len(results)
-                )
+                logger.info("places_search via Foursquare returned %d result(s)", len(results))
                 if results:
                     debug_exit("places_search.run", result=results)
                     return results

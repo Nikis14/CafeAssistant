@@ -90,7 +90,9 @@ def test_browser_fill_tool_returns_timeout_message_on_hidden_selector():
 
     backend = _TimeoutBackend()
     tools = build_browser_tools(backend)
-    result = _by_name(tools, "browser_fill").invoke({"selector": "input[name=name]", "value": "Ana"})
+    result = _by_name(tools, "browser_fill").invoke(
+        {"selector": "input[name=name]", "value": "Ana"}
+    )
     assert "could not fill" in result
     assert "none were visible" in result
 

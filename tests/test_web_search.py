@@ -37,9 +37,7 @@ def test_web_search_returns_normalized_results(monkeypatch):
         ]
 
     monkeypatch.setattr(_ws_module, "_do_search", fake_search)
-    result = web_search.invoke(
-        {"query": "Iva restaurant Belgrade reviews", "max_results": 5}
-    )
+    result = web_search.invoke({"query": "Iva restaurant Belgrade reviews", "max_results": 5})
     assert len(result) == 1
     assert result[0]["title"] == "Iva Review"
     assert result[0]["url"].startswith("https://")
@@ -52,9 +50,7 @@ def test_web_search_max_results_defaults_to_five(monkeypatch):
 
     def fake_search(query: str, max_results: int):
         captured["max"] = max_results
-        return [
-            {"title": "Web search unavailable", "url": "", "content": "fallback", "score": 0.0}
-        ]
+        return [{"title": "Web search unavailable", "url": "", "content": "fallback", "score": 0.0}]
 
     monkeypatch.setattr(_ws_module, "_do_search", fake_search)
     web_search.invoke({"query": "x"})

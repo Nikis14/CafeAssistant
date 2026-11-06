@@ -685,7 +685,7 @@ def test_run_impl_returns_needs_user_input_when_subagent_requests_missing_field(
 
 def test_run_impl_downgrades_pending_approval_when_blank_required_fill_was_blocked(monkeypatch):
     backend = MockBrowserBackend()
-    pending = register_pending("confirm_reservation", "Reserve at June Cafe")
+    register_pending("confirm_reservation", "Reserve at June Cafe")
 
     def _fake_run_browser_subagent(**_kwargs):
         return {

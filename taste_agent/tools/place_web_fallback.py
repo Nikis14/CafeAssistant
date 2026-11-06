@@ -63,13 +63,6 @@ class _CandidatePayload(BaseModel):
     candidates: list[_Candidate] = Field(default_factory=list)
 
 
-def _chat_model_kwargs(model_id: str) -> dict[str, Any]:
-    normalized = model_id.lower()
-    if normalized.startswith("openai/gpt-5"):
-        return {}
-    return {"temperature": 0.2}
-
-
 def set_current_model_id(model_id: str) -> Token[str]:
     """Bind the active UI-selected model for web enrichment extraction."""
     return _current_model_id.set(model_id)
@@ -167,10 +160,10 @@ def _extract_candidates(
     if raw_results and raw_results[0].get("status") == "error":
         return []
 
-    from langchain_litellm import ChatLiteLLM
+    from taste_agent.llm import get_model
 
     model_id = _get_current_model_id()
-    llm = ChatLiteLLM(model=model_id, **_chat_model_kwargs(model_id))
+    llm = get_model(model_id)
     prompt = (
         "You are extracting restaurant/cafe candidates from web search snippets.\n"
         "Only use places explicitly mentioned in the snippets. Do not invent URLs, "

@@ -38,6 +38,8 @@ def test_run_turn_returns_canned_response_via_fake_model():
     )
     assert "Kafeterija" in response
     assert debug["refused"] is False
+    # Every turn carries the LangSmith run id so the UI can attach feedback.
+    assert len(debug["run_id"]) == 36
     assert debug["pii_redactions"] == 0
 
 

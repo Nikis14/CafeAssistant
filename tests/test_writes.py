@@ -75,9 +75,7 @@ def test_write_semantic_default_store_is_module_singleton():
 
 def test_write_episodic_logs_event():
     _, epi = _new_stores()
-    result = write_episodic(
-        "Iva", "loved the gnocchi", rating=5, cuisine="Italian", store=epi
-    )
+    result = write_episodic("Iva", "loved the gnocchi", rating=5, cuisine="Italian", store=epi)
     assert result["written"] is True
     assert "doc_id" in result
     assert epi.count() == 1

@@ -28,6 +28,7 @@ escaped as ``{{`` and ``}}``.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from functools import cache
 from pathlib import Path
@@ -52,6 +53,13 @@ def load_template(name: str) -> PromptTemplate:
         raise FileNotFoundError(f"Prompt template not found: {path}")
     text = path.read_text(encoding="utf-8")
     return PromptTemplate.from_template(text, template_format="f-string")
+
+
+def prompt_version(name: str = "orchestrator") -> str:
+    """Short content hash of a template: goes into trace metadata so a quality
+    change in LangSmith can be tied to the exact prompt text that caused it."""
+    path = _TEMPLATE_DIR / f"{name}.txt"
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:8]
 
 
 # ── Helpers used by the system-prompt renderer ───────────────────────────────
@@ -97,7 +105,7 @@ def _render_booking_context(booking_values: dict[str, str] | None) -> str:
     lines = "\n".join(
         f"- {labels.get(key, key)}: {booking_values[key]}"
         for key in ordered
-        if key in booking_values and booking_values[key]
+        if booking_values.get(key)
     )
     if not lines:
         return ""

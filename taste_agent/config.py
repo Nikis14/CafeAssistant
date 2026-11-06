@@ -10,21 +10,19 @@ class ModelChoice:
     """A model option exposed in the Gradio dropdown."""
 
     label: str
-    litellm_id: str
+    model_id: str
     env_var: str
 
 
+NEURALDEEP_MODEL: str = "qwen3.6-35b-a3b-noreason"
+
 MODEL_REGISTRY: list[ModelChoice] = [
-    ModelChoice("Mistral Small", "mistral/mistral-small-latest", "MISTRAL_API_KEY"),
-    ModelChoice("GPT-5", "openai/gpt-5", "OPENAI_API_KEY"),
-    ModelChoice("GPT-5 mini", "openai/gpt-5-mini", "OPENAI_API_KEY"),
-    ModelChoice("GPT-5 nano", "openai/gpt-5-nano", "OPENAI_API_KEY"),
-    ModelChoice("Gemini 2.5 Flash", "gemini/gemini-2.5-flash", "GOOGLE_API_KEY"),
-    ModelChoice("Claude Sonnet 4.6", "anthropic/claude-sonnet-4-6", "ANTHROPIC_API_KEY"),
-    ModelChoice("Claude Haiku 4.5", "anthropic/claude-haiku-4-5", "ANTHROPIC_API_KEY"),
+    ModelChoice("Qwen 3.6 (NeuralDeep)", f"neuraldeep/{NEURALDEEP_MODEL}", "NEURAL_DEEP_API_KEY"),
+    ModelChoice("Gateway: NeuralDeep keys + OpenAI backup", "gateway", "NEURAL_DEEP_API_KEY"),
+    ModelChoice("GPT-5 nano (OpenAI)", "openai/gpt-5-nano", "OPENAI_API_KEY"),
 ]
 
-DEFAULT_MODEL_ID: str = "openai/gpt-5-nano"
+DEFAULT_MODEL_ID: str = os.environ.get("TASTE_AGENT_MODEL_ID", f"neuraldeep/{NEURALDEEP_MODEL}")
 ALLOW_RUNTIME_MOCKS: bool = os.environ.get("TASTE_AGENT_ALLOW_RUNTIME_MOCKS") == "1"
 
 # Filesystem layout

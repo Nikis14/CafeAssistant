@@ -28,12 +28,8 @@ def test_replace_all_writes_patterns():
 
 def test_replace_all_is_wholesale():
     p = ProceduralMemory()
-    p.replace_all(
-        [InferredPattern(text="old pattern", confidence=0.5, evidence_count=2)]
-    )
-    p.replace_all(
-        [InferredPattern(text="new pattern", confidence=0.9, evidence_count=5)]
-    )
+    p.replace_all([InferredPattern(text="old pattern", confidence=0.5, evidence_count=2)])
+    p.replace_all([InferredPattern(text="new pattern", confidence=0.9, evidence_count=5)])
     all_patterns = p.all()
     assert len(all_patterns) == 1
     assert all_patterns[0].text == "new pattern"
@@ -57,9 +53,7 @@ def test_all_returns_ordered_by_confidence_then_evidence():
 
 def test_as_text_renders_for_prompt_injection():
     p = ProceduralMemory()
-    p.replace_all(
-        [InferredPattern(text="Prefers Italian", confidence=0.85, evidence_count=4)]
-    )
+    p.replace_all([InferredPattern(text="Prefers Italian", confidence=0.85, evidence_count=4)])
     text = p.as_text()
     assert "Prefers Italian" in text
     assert "confidence 0.85" in text
@@ -91,9 +85,7 @@ def test_clear_wipes_patterns_and_meta():
 def test_derived_at_is_persisted():
     p = ProceduralMemory()
     when = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
-    p.replace_all(
-        [InferredPattern(text="x", confidence=0.5, evidence_count=2, derived_at=when)]
-    )
+    p.replace_all([InferredPattern(text="x", confidence=0.5, evidence_count=2, derived_at=when)])
     assert p.all()[0].derived_at == when
 
 

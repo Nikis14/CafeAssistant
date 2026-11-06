@@ -18,9 +18,7 @@ def test_save_and_get_spec_round_trip():
                 args={"url": "https://june-cafe.resos.com/booking"},
             )
         ],
-        required_fields=[
-            BookingFieldSpec(name="date", type="date", selector="input[name='date']")
-        ],
+        required_fields=[BookingFieldSpec(name="date", type="date", selector="input[name='date']")],
     )
     save_spec("https://june-cafe.resos.com/booking", spec)
     cached = get_spec("https://june-cafe.resos.com/anything")

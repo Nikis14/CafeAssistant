@@ -55,6 +55,8 @@ logger = get_logger(__name__)
 # Env vars controlling judge behavior
 _JUDGE_SKIP_ENV = "TASTE_AGENT_SKIP_OUTPUT_JUDGE"
 _JUDGE_MODEL_ENV = "TASTE_AGENT_JUDGE_MODEL_ID"
+
+
 def resolve_judge_model_id() -> str | None:
     """Pick the judge model id from environment, or return None to skip.
 
@@ -85,6 +87,7 @@ class _JudgePayload(BaseModel):
     factuality_concerns: list[str] = Field(default_factory=list)
     citation_ok: bool
     citation_concerns: list[str] = Field(default_factory=list)
+
 
 # Markers used in the redacted output. Distinct from the input-side markers so
 # a leak is visually obvious in the chat ("redacted" not "[EMAIL]") and the
@@ -223,7 +226,7 @@ def rewrite_internal_error_leaks(text: str) -> tuple[str, bool, list[str]]:
     cleaned = "\n\n".join(kept).strip()
     if not cleaned:
         cleaned = (
-            "I couldn’t confirm results from one of my search sources right now, "
+            "I couldn't confirm results from one of my search sources right now, "
             "but I can still help with other available information."
         )
     return cleaned, True, sorted(set(concerns))
@@ -317,9 +320,7 @@ def run_output_guardrails(
             judge_model_id = env_model or "disabled"
 
     with trace("guardrail:output", skip_judge=skip_judge):
-        cleaned, internal_rewritten, internal_concerns = rewrite_internal_error_leaks(
-            response_text
-        )
+        cleaned, internal_rewritten, internal_concerns = rewrite_internal_error_leaks(response_text)
         cleaned, n_pii, pii_concerns = redact_output_pii(cleaned)
 
         if skip_judge or model_factory is None:

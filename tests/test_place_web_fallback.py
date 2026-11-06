@@ -179,19 +179,20 @@ def test_place_web_enrichment_uses_current_selected_model(monkeypatch):
 
     captured: dict[str, str] = {}
 
-    class _FakeChatLiteLLM:
-        def __init__(self, model: str, **kwargs):
-            captured["model"] = model
-
+    class _FakeChatModel:
         def invoke(self, _messages):
             return types.SimpleNamespace(
                 content='{"candidates":[{"name":"Cafe Moskva","reason":"Classic Belgrade cafe.","review_snippet":"Cafe Moskva is a classic Belgrade spot.","neighborhood":"Stari Grad","website_url":"","maps_url":"","evidence_url":"https://example.com/moskva"}]}'
             )
 
+    def _fake_get_model(model_id: str):
+        captured["model"] = model_id
+        return _FakeChatModel()
+
+    import taste_agent.llm as llm_mod
+
     monkeypatch.setattr(_mod, "_do_search", fake_search)
-    monkeypatch.setitem(
-        sys.modules, "langchain_litellm", types.SimpleNamespace(ChatLiteLLM=_FakeChatLiteLLM)
-    )
+    monkeypatch.setattr(llm_mod, "get_model", _fake_get_model)
 
     token = set_current_model_id("openai/gpt-5-mini")
     try:

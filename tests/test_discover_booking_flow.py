@@ -1,5 +1,3 @@
-import pytest
-
 from taste_agent.browser.backend import MockBrowserBackend
 from taste_agent.browser.spec_cache import get_spec, has_spec, save_spec
 from taste_agent.browser.specs import BookingFlowSpec, BookingFlowStep
@@ -184,13 +182,9 @@ def test_discovery_subagent_blocks_cross_host_navigation_without_crashing(monkey
             self._tools = {tool.name: tool for tool in tools}
 
         def invoke(self, _payload):
-            self._tools["browser_navigate"].invoke(
-                {"url": "https://june-cafe.menu-world.com/"}
-            )
+            self._tools["browser_navigate"].invoke({"url": "https://june-cafe.menu-world.com/"})
             self._tools["browser_page_context"].invoke({})
-            self._tools["browser_navigate"].invoke(
-                {"url": "https://www.junecafebkk.com/"}
-            )
+            self._tools["browser_navigate"].invoke({"url": "https://www.junecafebkk.com/"})
             return {"messages": [AIMessage(content="done")]}
 
     monkeypatch.setattr(

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any, Literal, TypedDict
@@ -61,6 +62,7 @@ from taste_agent.guardrails import (
 )
 from taste_agent.logging_ import debug_enter, debug_exit, debug_print, get_logger, trace
 from taste_agent.memory import get_default_procedural, get_default_semantic
+from taste_agent.memory._session import current_session_id
 from taste_agent.memory.derive import maybe_derive_procedural
 from taste_agent.memory.gating import (
     MemoryGateDecision,
@@ -68,7 +70,7 @@ from taste_agent.memory.gating import (
     render_window_for_reflection,
 )
 from taste_agent.memory.reflection import ReflectionResult, run_reflection
-from taste_agent.prompts import system_prompt
+from taste_agent.prompts import prompt_version, system_prompt
 from taste_agent.skill_loader import load_all_skills
 from taste_agent.skills.reserve_table.reserve_table import (
     cancel_reservation,
@@ -91,64 +93,14 @@ logger = get_logger(__name__)
 
 
 # ── Model construction ───────────────────────────────────────────────────────
-# Indirection so tests can inject a fake chat model without importing LiteLLM.
+# Indirection so tests can inject a fake chat model without network access.
 ModelFactory = Callable[[str], BaseChatModel]
 
 
-def _chat_model_kwargs(model_id: str) -> dict[str, Any]:
-    """Return LiteLLM kwargs that are compatible with the target model."""
-    normalized = model_id.lower()
-    if normalized.startswith("openai/gpt-5"):
-        return {}
-    return {"temperature": 0.2}
-
-
 def _default_model_factory(model_id: str) -> BaseChatModel:
-    """Build a ChatLiteLLM for the given model id. Imports are lazy so tests
-    that inject a fake factory don't need LiteLLM installed.
-    """
-    from langchain_litellm import ChatLiteLLM
+    from taste_agent.llm import get_model
 
-    class DebugChatLiteLLM(ChatLiteLLM):
-        """Temporary debug wrapper: prints every internal model payload."""
-
-        def _generate(
-            self,
-            messages: list[BaseMessage],
-            stop: list[str] | None = None,
-            run_manager: Any | None = None,
-            stream: bool | None = None,
-            **kwargs: Any,
-        ) -> Any:
-            should_stream = stream if stream is not None else self.streaming
-            if should_stream:
-                return super()._generate(
-                    messages,
-                    stop=stop,
-                    run_manager=run_manager,
-                    stream=stream,
-                    **kwargs,
-                )
-
-            message_dicts, params = self._create_message_dicts(messages, stop)
-
-            print("\n=== MODEL CALL START ===")
-            for i, m in enumerate(messages):
-                print(f"[lc {i}] {type(m).__name__}: {m!r}")
-            print("--- serialized payload ---")
-            for i, m in enumerate(message_dicts):
-                print(f"[api {i}] {m}")
-            print("=== MODEL CALL END ===\n")
-
-            params = {**params, **kwargs}
-            response = self.completion_with_retry(
-                messages=message_dicts,
-                run_manager=run_manager,
-                **params,
-            )
-            return self._create_chat_result(response)
-
-    return DebugChatLiteLLM(model=model_id, **_chat_model_kwargs(model_id))
+    return get_model(model_id)
 
 
 # ── Agent construction ───────────────────────────────────────────────────────
@@ -257,7 +209,7 @@ def _get_agent_parts(model_id: str, factory: ModelFactory) -> tuple[Any, list[An
     """Return ``(llm, tools)`` for the given model + factory, cached.
 
     Cache key includes ``id(factory)`` so injecting a fake factory in tests
-    doesn't return a stale ChatLiteLLM-backed agent.
+    doesn't return a stale real-model-backed agent.
     """
     cache_key = (model_id, id(factory))
     if cache_key not in _AGENT_PARTS_CACHE:
@@ -287,7 +239,7 @@ def build_agent(
     runs per call; LLM + tools are cached).
 
     Args:
-        model_id: LiteLLM model identifier.
+        model_id: ``"<provider>/<model>"`` or ``"gateway"`` (see ``taste_agent.llm``).
         model_factory: optional override; tests inject fakes here.
         system_prompt_text: rendered system prompt passed to ``create_agent``.
             When None, no system prompt is set on the agent.
@@ -317,8 +269,11 @@ def reset_agent_cache() -> None:
 
 _APPROVE_WORDS = frozenset(
     {"yes", "y", "confirm", "ok", "okay", "sure", "proceed", "approve", "approved"}
+    | {"да", "ок", "подтверждаю", "бронируй", "давай"}
 )
-_CANCEL_WORDS = frozenset({"no", "n", "cancel", "stop", "abort", "nope", "nevermind"})
+_CANCEL_WORDS = frozenset(
+    {"no", "n", "cancel", "stop", "abort", "nope", "nevermind"} | {"нет", "отмена", "стоп"}
+)
 
 
 _MAX_INTENT_TOKENS = 3
@@ -1054,7 +1009,7 @@ def run_turn(
     Args:
         user_text: raw input from the user.
         history: prior LangChain messages (empty for first turn).
-        model_id: LiteLLM model identifier.
+        model_id: ``"<provider>/<model>"`` or ``"gateway"`` (see ``taste_agent.llm``).
         model_factory: optional injection point for tests.
         skip_output_judge: explicit override; None defers to env-resolution.
 
@@ -1071,6 +1026,19 @@ def run_turn(
         "skip_output_judge": skip_output_judge,
         "skip_reflection": skip_reflection,
     }
+    # One LangSmith trace per turn. ``session_id`` groups turns of one dialog
+    # into a thread; ``run_id`` is returned so the UI can attach user feedback.
+    run_id = uuid.uuid4()
+    config = {
+        "run_name": "taste_agent_turn",
+        "run_id": run_id,
+        "tags": ["taste-agent", model_id],
+        "metadata": {
+            "session_id": current_session_id(),
+            "model_id": model_id,
+            "prompt_version": prompt_version(),
+        },
+    }
     with trace("turn", model=model_id):
-        final_state = _get_graph().invoke(initial_state)
-    return final_state["response_text"], final_state["debug"]
+        final_state = _get_graph().invoke(initial_state, config=config)
+    return final_state["response_text"], {**final_state["debug"], "run_id": str(run_id)}
