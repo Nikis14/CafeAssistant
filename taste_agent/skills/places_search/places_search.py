@@ -220,10 +220,30 @@ def _foursquare_search(
 # ── Mock backend (Phase 1) ───────────────────────────────────────────────────
 
 
+# The agent often passes a Russian query through untranslated.
+_RU_TAG_STEMS: dict[str, tuple[str, ...]] = {
+    "coffee": ("кофе",),
+    "cafe": ("кафе", "кофейн"),
+    "cappuccino": ("капучино",),
+    "quiet": ("тих",),
+    "wifi": ("ноутбук",),
+    "roastery": ("обжар",),
+    "restaurant": ("ресторан", "ужин"),
+    "balkan": ("балкан",),
+    "vegetarian": ("вегетариан",),
+    "european": ("европ",),
+    "wine": ("вин",),
+}
+
+
+def _tag_hit(tag: str, q: str) -> bool:
+    return tag in q or any(stem in q for stem in _RU_TAG_STEMS.get(tag, ()))
+
+
 def _score(query: str, place: PlaceFixture) -> int:
     """Number of tag hits in the query. Higher is better."""
     q = query.lower()
-    return sum(1 for tag in place["tags"] if tag in q)
+    return sum(1 for tag in place["tags"] if _tag_hit(tag, q))
 
 
 def _mock_search(query: str, location: str, max_results: int) -> list[dict[str, object]]:
@@ -236,7 +256,7 @@ def _mock_search(query: str, location: str, max_results: int) -> list[dict[str, 
 
     results: list[dict[str, object]] = []
     for score, place in scored[:max_results]:
-        matched_tags = [t for t in place["tags"] if t in query.lower()]
+        matched_tags = [t for t in place["tags"] if _tag_hit(t, query.lower())]
         reason = f"Matches: {', '.join(matched_tags)}" if matched_tags else "General fit"
         results.append(
             PlaceResult(

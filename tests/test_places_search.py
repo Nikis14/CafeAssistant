@@ -65,6 +65,13 @@ def test_vegetarian_query_finds_vegetarian_tag():
     assert "Iva New Balkan Cuisine" in names
 
 
+def test_russian_query_matches_via_stems():
+    results = places_search_run("best балканская кухня ужин in Белград", "Белград", 5)
+    names = {r["name"] for r in results}
+    assert {"Iva New Balkan Cuisine", "Ambar"} <= names
+    assert all(r["status"] != "error" for r in results)
+
+
 def test_quiet_query_ranks_quiet_places_higher():
     results = places_search_run("quiet cafe", "Belgrade", 5)
     # Top result should have 'quiet' in its tags (Kafeterija or Iva)
