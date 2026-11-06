@@ -18,6 +18,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+          # Same Python as the Dockerfile; the runner default (3.14) breaks pydantic.v1 deps.
+          python-version: "3.12"
 
       - name: Install dependencies (from uv.lock)
         run: uv sync --locked --group dev
